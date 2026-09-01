@@ -39,7 +39,7 @@ pub enum DomainError {
     #[error("Target object is not a file.")]
     NotAFile,
 
-    #[error("Object has no ready content.")]
+    #[error("No ready content is available.")]
     ContentNotReady,
 
     #[error("Idempotency-Key was already used with a different request.")]

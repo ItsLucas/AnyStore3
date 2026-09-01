@@ -33,10 +33,21 @@ use anystore_domain::object::ObjectView;
 use anystore_domain::{ObjectId, Page};
 use async_trait::async_trait;
 
+/// Internal storage pointer for a file with ready content.
+///
+/// Returned only to the content service so it can sign provider access; it is
+/// never part of any public representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContentPointer {
+    pub blob_backend: String,
+    pub blob_ref: String,
+}
+
 /// Read-only object access.
 #[async_trait]
 pub trait ObjectRepository: Send + Sync {
     async fn get_object(&self, id: &ObjectId) -> DomainResult<Option<ObjectView>>;
+    async fn content_pointer(&self, id: &ObjectId) -> DomainResult<Option<ContentPointer>>;
     async fn list_children(&self, q: ListChildren) -> DomainResult<Page<ObjectView>>;
     async fn resolve_path(&self, path: &str) -> DomainResult<Option<ObjectView>>;
     async fn query_objects(&self, q: ObjectQuery) -> DomainResult<Page<ObjectView>>;

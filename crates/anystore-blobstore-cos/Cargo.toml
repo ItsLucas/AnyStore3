@@ -1,0 +1,19 @@
+[package]
+name = "anystore-blobstore-cos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anystore-domain.workspace = true
+anystore-blobstore.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+hmac.workspace = true
+percent-encoding.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+sha1.workspace = true
+tracing.workspace = true

@@ -132,6 +132,14 @@ pub trait BlobStore: Send + Sync {
         false
     }
 
+    /// Derives the immutable blob location for an upload session.
+    ///
+    /// Deterministic so the upload row can be persisted *before* the provider
+    /// is contacted: a crash then leaves a recoverable record rather than an
+    /// untracked orphan. The logical folder path and file name are never
+    /// encoded into the result, which is why rename and move touch no blob.
+    fn blob_ref_for(&self, upload_id: &str) -> BlobRef;
+
     async fn prepare_upload(&self, req: PrepareUpload) -> DomainResult<PreparedUpload>;
 
     async fn sign_parts(&self, req: SignParts) -> DomainResult<Vec<SignedPart>>;
@@ -139,6 +147,11 @@ pub trait BlobStore: Send + Sync {
     /// Finalises the provider-side upload. Must be safe to call repeatedly: if
     /// the provider upload was already finalised, it must converge rather than
     /// fail.
+    ///
+    /// Returns [`DomainError::ContentNotReady`] when the client never uploaded
+    /// the bytes; that is a caller mistake, not a provider fault.
+    ///
+    /// [`DomainError::ContentNotReady`]: anystore_domain::error::DomainError::ContentNotReady
     async fn ensure_upload_completed(&self, req: CompleteBlobUpload) -> DomainResult<BlobStat>;
 
     async fn abort_upload(&self, req: AbortBlobUpload) -> DomainResult<()>;

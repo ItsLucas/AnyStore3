@@ -1,0 +1,25 @@
+[package]
+name = "anystore-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anystore-server"
+path = "src/main.rs"
+
+[dependencies]
+anystore-domain.workspace = true
+anystore-application.workspace = true
+anystore-blobstore.workspace = true
+anystore-blobstore-cos.workspace = true
+anystore-blobstore-local.workspace = true
+anystore-http.workspace = true
+anystore-metastore.workspace = true
+anystore-metastore-postgres.workspace = true
+axum.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

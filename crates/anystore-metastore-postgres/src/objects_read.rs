@@ -9,6 +9,7 @@ use anystore_metastore::commands::{
     ListChildren, ListOrder, MetadataCondition, ObjectQuery, OrderBy,
 };
 use anystore_metastore::ObjectRepository;
+use anystore_metastore::ContentPointer;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, QueryBuilder, Row};
@@ -57,6 +58,30 @@ impl ObjectRepository for PostgresMetaStore {
     async fn get_object(&self, id: &ObjectId) -> DomainResult<Option<ObjectView>> {
         let mut conn = self.pool().acquire().await.map_err(map_sqlx)?;
         load_view(&mut conn, id).await
+    }
+
+    async fn content_pointer(&self, id: &ObjectId) -> DomainResult<Option<ContentPointer>> {
+        let row = sqlx::query(
+            "SELECT blob_backend, blob_ref FROM objects
+             WHERE id = $1 AND deleted_at IS NULL AND content_state = 'ready'",
+        )
+        .bind(id.as_str())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_sqlx)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let blob_backend: Option<String> = row.try_get("blob_backend").map_err(map_sqlx)?;
+        let blob_ref: Option<String> = row.try_get("blob_ref").map_err(map_sqlx)?;
+        Ok(match (blob_backend, blob_ref) {
+            (Some(blob_backend), Some(blob_ref)) => Some(ContentPointer {
+                blob_backend,
+                blob_ref,
+            }),
+            _ => None,
+        })
     }
 
     async fn list_children(&self, q: ListChildren) -> DomainResult<Page<ObjectView>> {

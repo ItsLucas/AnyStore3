@@ -5,6 +5,11 @@ members = [
     "crates/anystore-metastore",
     "crates/anystore-blobstore",
     "crates/anystore-metastore-postgres",
+    "crates/anystore-application",
+    "crates/anystore-http",
+    "crates/anystore-blobstore-local",
+    "crates/anystore-blobstore-cos",
+    "crates/anystore-server",
 ]
 
 [workspace.package]
@@ -33,7 +38,7 @@ hmac = "0.12"
 http = "1"
 percent-encoding = "2"
 quick-xml = "0.42"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-tls", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "rustls-native-certs", "webpki-roots", "http2", "charset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
