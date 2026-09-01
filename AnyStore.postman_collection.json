@@ -1,0 +1,763 @@
+{
+  "info": {
+    "_postman_id": "6f24c281-b957-4d4c-9bf0-4c7b7c2f2b1a",
+    "name": "AnyStore v1 Contract Tests",
+    "description": "Executable core contract tests. See AnyStore_Postman_Test_Cases.md for full boundary coverage.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080/api/v1"
+    },
+    {
+      "key": "folderId",
+      "value": ""
+    },
+    {
+      "key": "folderRevision",
+      "value": ""
+    },
+    {
+      "key": "fileId",
+      "value": ""
+    },
+    {
+      "key": "fileRevision",
+      "value": ""
+    },
+    {
+      "key": "oldRevision",
+      "value": ""
+    },
+    {
+      "key": "uploadId",
+      "value": ""
+    },
+    {
+      "key": "changesCursor",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Objects",
+      "item": [
+        {
+          "name": "T01 Create Folder",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-create-folder-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"folder\",\n  \"name\": \"postman-folder\",\n  \"parent_id\": \"root\",\n  \"metadata\": {\n    \"suite\": \"postman\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201\", () => pm.response.to.have.status(201));",
+                  "const j=pm.response.json();",
+                  "pm.expect(j.revision).to.eql(1);",
+                  "pm.expect(j.kind).to.eql(\"folder\");",
+                  "pm.collectionVariables.set(\"folderId\",j.id);",
+                  "pm.collectionVariables.set(\"folderRevision\",String(j.revision));",
+                  "pm.collectionVariables.set(\"createFolderResponse\",pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T02 Create Folder Retry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-create-folder-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"folder\",\n  \"name\": \"postman-folder\",\n  \"parent_id\": \"root\",\n  \"metadata\": {\n    \"suite\": \"postman\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"same original result\",()=>pm.response.to.have.status(201)); pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get(\"createFolderResponse\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T03 Idempotency Key Reused",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-create-folder-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"folder\",\n  \"name\": \"different-folder\",\n  \"parent_id\": \"root\",\n  \"metadata\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"409\",()=>pm.response.to.have.status(409)); pm.expect(pm.response.json().error).to.eql(\"idempotency_key_reused\");"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T04 Create File",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-create-file-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"file\",\n  \"name\": \"example.txt\",\n  \"parent_id\": \"{{folderId}}\",\n  \"content_type\": \"text/plain\",\n  \"metadata\": {\n    \"suite\": \"postman\",\n    \"version\": 1\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201\", () => pm.response.to.have.status(201));",
+                  "const j=pm.response.json();",
+                  "pm.expect(j.revision).to.eql(1);",
+                  "pm.expect(j.content_state).to.eql(\"none\");",
+                  "pm.collectionVariables.set(\"fileId\",j.id);",
+                  "pm.collectionVariables.set(\"fileRevision\",String(j.revision));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T07 Conditional Metadata Update",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{fileRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-patch-metadata-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"metadata\": {\n    \"set\": {\n      \"version\": 2,\n      \"new_key\": true\n    },\n    \"remove\": []\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\", () => pm.response.to.have.status(200));",
+                  "const j=pm.response.json();",
+                  "const old=Number(pm.collectionVariables.get(\"fileRevision\"));",
+                  "pm.expect(j.revision).to.eql(old+1);",
+                  "pm.collectionVariables.set(\"oldRevision\",String(old));",
+                  "pm.collectionVariables.set(\"fileRevision\",String(j.revision));",
+                  "pm.collectionVariables.set(\"patchResponse\",pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T08 Stale Revision Conflict",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{oldRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-patch-stale-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"metadata\": {\n    \"set\": {\n      \"should_not_write\": true\n    },\n    \"remove\": []\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"412\",()=>pm.response.to.have.status(412)); const j=pm.response.json(); pm.expect(j.error).to.eql(\"revision_conflict\"); pm.expect(String(j.current_revision)).to.eql(pm.collectionVariables.get(\"fileRevision\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T09 PATCH Idempotent Replay",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{oldRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-patch-metadata-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"metadata\": {\n    \"set\": {\n      \"version\": 2,\n      \"new_key\": true\n    },\n    \"remove\": []\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"original success\",()=>pm.response.to.have.status(200)); pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get(\"patchResponse\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Object",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\",()=>pm.response.to.have.status(200)); const j=pm.response.json(); pm.expect(j.id).to.eql(pm.collectionVariables.get(\"fileId\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metadata Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/query",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"file\",\n  \"metadata\": {\n    \"new_key\": {\n      \"exists\": true\n    }\n  },\n  \"limit\": 100,\n  \"cursor\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\",()=>pm.response.to.have.status(200)); pm.expect(pm.response.json().items).to.be.an(\"array\");"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Changes",
+      "item": [
+        {
+          "name": "T24 Initial Changes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/changes?limit=500",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\",()=>pm.response.to.have.status(200)); const j=pm.response.json(); pm.expect(j.items).to.be.an(\"array\"); pm.collectionVariables.set(\"changesCursor\",j.next_cursor||\"\");"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T27 Stable Cursor First",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/changes?cursor={{changesCursor}}&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\",()=>pm.response.to.have.status(200)); pm.collectionVariables.set(\"stablePage\",pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T27 Stable Cursor Repeat",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/changes?cursor={{changesCursor}}&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"stable\",()=>pm.response.to.have.status(200)); pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get(\"stablePage\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Upload",
+      "item": [
+        {
+          "name": "T15 Create Upload Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-upload-create-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/uploads",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object_id\": \"{{fileId}}\",\n  \"size\": 11,\n  \"content_type\": \"text/plain\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"created\",()=>pm.expect([200,201]).to.include(pm.response.code)); const j=pm.response.json(); pm.collectionVariables.set(\"uploadId\",j.id); pm.collectionVariables.set(\"uploadResponse\",pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T16 Upload Session Retry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-upload-create-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/uploads",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object_id\": \"{{fileId}}\",\n  \"size\": 11,\n  \"content_type\": \"text/plain\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"same result\",()=>pm.expect([200,201]).to.include(pm.response.code)); pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get(\"uploadResponse\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T18 Complete Upload",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{fileRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-upload-complete-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/uploads/{{uploadId}}/complete",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"completion contract\",()=>pm.expect([200,409,412,422]).to.include(pm.response.code)); if(pm.response.code===200){const j=pm.response.json(); pm.collectionVariables.set(\"fileRevision\",String(j.revision)); pm.collectionVariables.set(\"completeResponse\",pm.response.text());}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Delete",
+      "item": [
+        {
+          "name": "T30 Delete Success",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "If-Match",
+                "value": "{{fileRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-delete-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"204\",()=>pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "T31 Delete Retry",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "If-Match",
+                "value": "{{fileRevision}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "test-delete-001",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/objects/{{fileId}}",
+              "host": [
+                "{{baseUrl}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"original 204\",()=>pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
