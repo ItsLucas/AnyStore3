@@ -41,11 +41,7 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Runs a handler body and converts a domain error into the contract's error
 /// envelope, recording the matching metric on the way out.
-pub(crate) async fn respond<F>(
-    metrics: Arc<AppMetrics>,
-    request_id: &RequestId,
-    fut: F,
-) -> Response
+pub(crate) async fn respond<F>(metrics: Arc<AppMetrics>, request_id: &RequestId, fut: F) -> Response
 where
     F: Future<Output = DomainResult<Response>>,
 {
@@ -60,9 +56,7 @@ where
 
 fn record_error(metrics: &AppMetrics, error: &DomainError) {
     match error {
-        DomainError::RevisionConflict { .. } => {
-            AppMetrics::incr(&metrics.revision_conflicts_total)
-        }
+        DomainError::RevisionConflict { .. } => AppMetrics::incr(&metrics.revision_conflicts_total),
         DomainError::StorageError(_) => AppMetrics::incr(&metrics.blob_provider_errors_total),
         DomainError::Internal(_) => AppMetrics::incr(&metrics.db_errors_total),
         _ => {}
@@ -74,7 +68,9 @@ pub fn router(state: HttpState) -> Router {
         .route("/objects", post(objects::create))
         .route(
             "/objects/{id}",
-            get(objects::get).patch(objects::patch).delete(objects::delete),
+            get(objects::get)
+                .patch(objects::patch)
+                .delete(objects::delete),
         )
         .route("/objects/{id}/children", get(objects::children))
         .route(

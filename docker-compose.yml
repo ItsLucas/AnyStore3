@@ -1,0 +1,18 @@
+# Local development dependencies.
+#
+# Production uses CloudBase PostgreSQL and LightCOS; this file only provides a
+# database for running the test suites.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: anystore
+      POSTGRES_DB: anystore
+    ports:
+      - "127.0.0.1:54329:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d anystore"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

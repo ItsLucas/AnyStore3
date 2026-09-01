@@ -14,3 +14,8 @@ serde_json.workspace = true
 sqlx.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+anystore-testkit.workspace = true
+async-trait.workspace = true
+tokio.workspace = true

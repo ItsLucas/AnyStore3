@@ -112,8 +112,7 @@ pub fn upload_id(raw: &str) -> DomainResult<UploadId> {
 /// Emits a stored mutation response verbatim, which is what makes an idempotent
 /// replay byte-identical to the original.
 pub fn stored_response(stored: StoredResponse, request_id: &RequestId) -> Response {
-    let status =
-        StatusCode::from_u16(stored.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(stored.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder()
         .status(status)
         .header("x-request-id", request_id.as_str());

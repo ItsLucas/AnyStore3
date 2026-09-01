@@ -39,8 +39,7 @@ struct LockedObject {
 }
 
 async fn lock_object(conn: &mut PgConnection, id: &ObjectId) -> DomainResult<Option<LockedObject>> {
-    let sql =
-        format!("SELECT {OBJECT_COLUMNS}, deleted_at FROM objects WHERE id = $1 FOR UPDATE");
+    let sql = format!("SELECT {OBJECT_COLUMNS}, deleted_at FROM objects WHERE id = $1 FOR UPDATE");
     let row = sqlx::query(AssertSqlSafe(sql))
         .bind(id.as_str())
         .fetch_optional(&mut *conn)
@@ -114,7 +113,10 @@ async fn append_changes(
     let change_ids: Vec<String> = records.iter().map(|r| r.change_id.to_string()).collect();
     let object_ids: Vec<String> = records.iter().map(|r| r.object_id.to_string()).collect();
     let revisions: Vec<i64> = records.iter().map(|r| r.revision.get() as i64).collect();
-    let actions: Vec<String> = records.iter().map(|r| r.action.as_str().to_owned()).collect();
+    let actions: Vec<String> = records
+        .iter()
+        .map(|r| r.action.as_str().to_owned())
+        .collect();
     let changed_ats: Vec<DateTime<Utc>> = records.iter().map(|r| r.changed_at).collect();
     let request_ids: Vec<String> = records.iter().map(|r| r.request_id.to_string()).collect();
     let keys: Vec<Option<String>> = records
@@ -323,7 +325,8 @@ impl ObjectMutationStore for PostgresMetaStore {
                 Some(ObjectKind::File) => return Err(DomainError::NotAFolder),
                 Some(ObjectKind::Folder) => {}
             }
-            if current.is_folder() && is_self_or_descendant(&mut tx, &destination, &current.id).await?
+            if current.is_folder()
+                && is_self_or_descendant(&mut tx, &destination, &current.id).await?
             {
                 return Err(DomainError::InvalidMove(
                     "A folder cannot be moved into itself or one of its descendants.".into(),
@@ -571,7 +574,11 @@ impl ObjectMutationStore for PostgresMetaStore {
 
         let changes = append_changes(
             &mut tx,
-            &[PendingChange::new(cmd.object_id.clone(), new_revision, action)],
+            &[PendingChange::new(
+                cmd.object_id.clone(),
+                new_revision,
+                action,
+            )],
             &cmd.ctx.request_id,
             cmd.ctx.idempotency_key.as_ref(),
             cmd.ctx.now,

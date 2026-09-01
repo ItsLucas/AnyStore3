@@ -65,7 +65,9 @@ impl TencentCosBlobStore {
             .to_owned();
 
         if endpoint.is_empty() || config.bucket.trim().is_empty() {
-            return Err(DomainError::internal("COS bucket and endpoint are required"));
+            return Err(DomainError::internal(
+                "COS bucket and endpoint are required",
+            ));
         }
 
         // Tolerates an endpoint that already includes the bucket.
@@ -437,7 +439,12 @@ impl BlobStore for TencentCosBlobStore {
         };
         let query = vec![("uploadId".to_owned(), provider_upload_id)];
         let (status, _, body) = self
-            .send(Method::DELETE, &self.object_path(&req.blob_ref), &query, None)
+            .send(
+                Method::DELETE,
+                &self.object_path(&req.blob_ref),
+                &query,
+                None,
+            )
             .await?;
 
         if status.is_success() || status == StatusCode::NOT_FOUND {
@@ -523,7 +530,10 @@ mod tests {
 
     #[test]
     fn blob_keys_do_not_encode_object_names() {
-        assert_eq!(store().blob_ref_for("upload_01").as_str(), "blobs/upload_01");
+        assert_eq!(
+            store().blob_ref_for("upload_01").as_str(),
+            "blobs/upload_01"
+        );
     }
 
     #[test]

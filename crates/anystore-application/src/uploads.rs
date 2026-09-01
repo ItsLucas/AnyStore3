@@ -335,7 +335,10 @@ impl UploadService {
 
                 // When the backend cannot verify server-side, the stored hash
                 // is the client's declaration, per the architecture document.
-                let sha256 = stat.sha256.clone().or_else(|| upload.expected_sha256.clone());
+                let sha256 = stat
+                    .sha256
+                    .clone()
+                    .or_else(|| upload.expected_sha256.clone());
 
                 state
                     .meta

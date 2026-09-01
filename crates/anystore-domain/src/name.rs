@@ -23,10 +23,14 @@ pub fn validate_name(name: &str) -> DomainResult<()> {
         )));
     }
     if name.contains('/') {
-        return Err(DomainError::InvalidName("Name must not contain '/'.".into()));
+        return Err(DomainError::InvalidName(
+            "Name must not contain '/'.".into(),
+        ));
     }
     if name.contains('\0') {
-        return Err(DomainError::InvalidName("Name must not contain NUL.".into()));
+        return Err(DomainError::InvalidName(
+            "Name must not contain NUL.".into(),
+        ));
     }
     if name == "." || name == ".." {
         return Err(DomainError::InvalidName(

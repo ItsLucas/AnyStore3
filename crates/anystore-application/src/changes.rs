@@ -33,7 +33,11 @@ impl ChangeService {
             .meta
             .read_changes(ReadChanges {
                 cursor: cursor.filter(|c| !c.is_empty()).map(CursorId::new),
-                limit: clamp_limit(limit, config.changes_default_limit, config.changes_max_limit),
+                limit: clamp_limit(
+                    limit,
+                    config.changes_default_limit,
+                    config.changes_max_limit,
+                ),
                 now,
                 cursor_expires_at: now + config.changes_cursor_ttl,
             })

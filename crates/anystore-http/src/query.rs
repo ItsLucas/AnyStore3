@@ -1,15 +1,15 @@
 //! Metadata query handler.
 
 use anystore_application::query::{QueryRequest, QueryService};
+use anystore_domain::ObjectId;
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::object::ObjectKind;
-use anystore_domain::ObjectId;
 use anystore_metastore::commands::MetadataCondition;
+use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::Extension;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -41,17 +41,18 @@ fn parse_conditions(value: Option<&Value>) -> DomainResult<Vec<(String, Metadata
             )));
         }
         let (operator, operand) = condition.iter().next().expect("length checked above");
-        let parsed = match operator.as_str() {
-            "eq" => MetadataCondition::Eq(operand.clone()),
-            "exists" => MetadataCondition::Exists(operand.as_bool().ok_or_else(|| {
-                DomainError::InvalidRequest("exists must be a boolean.".into())
-            })?),
-            other => {
-                return Err(DomainError::InvalidRequest(format!(
-                    "unsupported metadata operator {other:?}; v1 supports eq and exists."
-                )));
-            }
-        };
+        let parsed =
+            match operator.as_str() {
+                "eq" => MetadataCondition::Eq(operand.clone()),
+                "exists" => MetadataCondition::Exists(operand.as_bool().ok_or_else(|| {
+                    DomainError::InvalidRequest("exists must be a boolean.".into())
+                })?),
+                other => {
+                    return Err(DomainError::InvalidRequest(format!(
+                        "unsupported metadata operator {other:?}; v1 supports eq and exists."
+                    )));
+                }
+            };
         conditions.push((key.clone(), parsed));
     }
     Ok(conditions)
@@ -75,9 +76,14 @@ pub async fn query(
 
         let limit = match parsed.get("limit") {
             Some(Value::Null) | None => None,
-            Some(value) => Some(value.as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(
-                || DomainError::InvalidRequest("limit must be a positive integer.".into()),
-            )?),
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| {
+                        DomainError::InvalidRequest("limit must be a positive integer.".into())
+                    })?,
+            ),
         };
 
         let service = QueryService::new(Arc::clone(&state.app));

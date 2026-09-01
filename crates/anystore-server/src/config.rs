@@ -85,10 +85,17 @@ impl ServerConfig {
             )));
         }
 
-        let port: u16 = parse("ANYSTORE_PORT", 8088)?;
+        // CloudBase Run and most PaaS hosts inject PORT.
+        let port: u16 = match var("ANYSTORE_PORT") {
+            Some(_) => parse("ANYSTORE_PORT", 8088)?,
+            None => parse("PORT", 8088)?,
+        };
 
         let app = AppConfig {
-            idempotency_retention: Duration::hours(parse("ANYSTORE_IDEMPOTENCY_RETENTION_HOURS", 24i64)?),
+            idempotency_retention: Duration::hours(parse(
+                "ANYSTORE_IDEMPOTENCY_RETENTION_HOURS",
+                24i64,
+            )?),
             changes_retention: Duration::days(parse("ANYSTORE_CHANGES_RETENTION_DAYS", 30i64)?),
             changes_cursor_ttl: Duration::days(parse("ANYSTORE_CHANGES_CURSOR_TTL_DAYS", 30i64)?),
             upload_expiry: Duration::hours(parse("ANYSTORE_UPLOAD_EXPIRY_HOURS", 24i64)?),

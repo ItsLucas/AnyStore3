@@ -76,11 +76,10 @@ impl PostgresMetaStore {
 
     /// Verifies the schema is present before serving traffic.
     pub async fn check_schema(&self) -> DomainResult<()> {
-        let exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('public.objects') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(map_sqlx)?;
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass('public.objects') IS NOT NULL")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx)?;
         if !exists {
             return Err(DomainError::internal(
                 "database schema is not initialised; run migrations",

@@ -17,8 +17,7 @@ use sqlx::{AssertSqlSafe, PgConnection, Row, postgres::PgRow};
 use crate::PostgresMetaStore;
 use crate::errors::map_sqlx;
 
-const CHANGE_COLUMNS: &str =
-    "seq, change_id, object_id, revision, action, changed_at, request_id, idempotency_key, tombstone";
+const CHANGE_COLUMNS: &str = "seq, change_id, object_id, revision, action, changed_at, request_id, idempotency_key, tombstone";
 
 fn decode_change(row: &PgRow) -> DomainResult<(i64, ChangeRecord)> {
     let seq: i64 = row.try_get("seq").map_err(map_sqlx)?;
@@ -32,8 +31,9 @@ fn decode_change(row: &PgRow) -> DomainResult<(i64, ChangeRecord)> {
             change_id: ChangeId::new(row.try_get::<String, _>("change_id").map_err(map_sqlx)?),
             object_id: ObjectId::new(row.try_get::<String, _>("object_id").map_err(map_sqlx)?),
             revision: Revision(revision as u64),
-            action: ChangeAction::parse(&action)
-                .ok_or_else(|| DomainError::internal(format!("unknown change action {action:?}")))?,
+            action: ChangeAction::parse(&action).ok_or_else(|| {
+                DomainError::internal(format!("unknown change action {action:?}"))
+            })?,
             changed_at: row.try_get("changed_at").map_err(map_sqlx)?,
             request_id: RequestId::new(row.try_get::<String, _>("request_id").map_err(map_sqlx)?),
             idempotency_key: key.map(IdempotencyKey::new),
@@ -55,12 +55,11 @@ async fn build_page(
     after_seq: i64,
     limit: u32,
 ) -> DomainResult<BuiltPage> {
-    let snapshot_max_seq: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(seq), $1) FROM changes")
-            .bind(after_seq)
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(map_sqlx)?;
+    let snapshot_max_seq: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq), $1) FROM changes")
+        .bind(after_seq)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
     let snapshot_max_seq = snapshot_max_seq.max(after_seq);
 
     let sql = format!(
@@ -83,14 +82,13 @@ async fn build_page(
         .collect::<DomainResult<Vec<(i64, ChangeRecord)>>>()?;
 
     let page_end_seq = decoded.last().map(|(seq, _)| *seq).unwrap_or(after_seq);
-    let has_more: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM changes WHERE seq > $1 AND seq <= $2)",
-    )
-    .bind(page_end_seq)
-    .bind(snapshot_max_seq)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(map_sqlx)?;
+    let has_more: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes WHERE seq > $1 AND seq <= $2)")
+            .bind(page_end_seq)
+            .bind(snapshot_max_seq)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(map_sqlx)?;
 
     Ok(BuiltPage {
         items: decoded.into_iter().map(|(_, record)| record).collect(),
@@ -139,13 +137,9 @@ impl ChangeStore for PostgresMetaStore {
             // An initial read starts from the oldest retained Change.
             None => {
                 let built = build_page(&mut tx, watermark, req.limit).await?;
-                let next = create_cursor(
-                    &mut tx,
-                    built.page_end_seq,
-                    req.now,
-                    req.cursor_expires_at,
-                )
-                .await?;
+                let next =
+                    create_cursor(&mut tx, built.page_end_seq, req.now, req.cursor_expires_at)
+                        .await?;
                 ChangePage {
                     items: built.items,
                     next_cursor: next,
@@ -187,8 +181,7 @@ impl ChangeStore for PostgresMetaStore {
                     }
                     let page_end_seq: i64 = row.try_get("page_end_seq").map_err(map_sqlx)?;
                     let has_more: bool = row.try_get("has_more").map_err(map_sqlx)?;
-                    let next_cursor_id: String =
-                        row.try_get("next_cursor_id").map_err(map_sqlx)?;
+                    let next_cursor_id: String = row.try_get("next_cursor_id").map_err(map_sqlx)?;
 
                     let sql = format!(
                         "SELECT {CHANGE_COLUMNS} FROM changes
@@ -214,13 +207,9 @@ impl ChangeStore for PostgresMetaStore {
                     }
                 } else {
                     let built = build_page(&mut tx, after_seq, req.limit).await?;
-                    let next = create_cursor(
-                        &mut tx,
-                        built.page_end_seq,
-                        req.now,
-                        req.cursor_expires_at,
-                    )
-                    .await?;
+                    let next =
+                        create_cursor(&mut tx, built.page_end_seq, req.now, req.cursor_expires_at)
+                            .await?;
 
                     sqlx::query(
                         "UPDATE change_cursors

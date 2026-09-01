@@ -134,7 +134,9 @@ mod tests {
     #[test]
     fn non_object_metadata_is_rejected() {
         assert_eq!(
-            validate_metadata_document(&json!([1, 2])).unwrap_err().code(),
+            validate_metadata_document(&json!([1, 2]))
+                .unwrap_err()
+                .code(),
             "invalid_metadata"
         );
     }

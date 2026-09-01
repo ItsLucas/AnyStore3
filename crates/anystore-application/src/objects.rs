@@ -1,5 +1,6 @@
 //! Object lifecycle: create, read, list, resolve, patch and delete.
 
+use anystore_domain::ObjectId;
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::metadata::{
     MetadataPatch, validate_metadata_document, validate_metadata_patch,
@@ -7,7 +8,6 @@ use anystore_domain::metadata::{
 use anystore_domain::name::validate_name;
 use anystore_domain::object::ObjectKind;
 use anystore_domain::page::clamp_limit;
-use anystore_domain::ObjectId;
 use anystore_metastore::commands::{
     CreateObjectCommit, DeleteObjectCommit, ListChildren, ListOrder, MutationContext,
     MutationOutcome, OrderBy, PatchObjectCommit,
@@ -104,7 +104,9 @@ impl ObjectService {
     ) -> DomainResult<StoredResponse> {
         validate_name(&req.name)?;
 
-        let metadata = req.metadata.unwrap_or_else(|| Value::Object(Default::default()));
+        let metadata = req
+            .metadata
+            .unwrap_or_else(|| Value::Object(Default::default()));
         validate_metadata_document(&metadata)?;
 
         if req.kind == ObjectKind::Folder && req.content_type.is_some() {

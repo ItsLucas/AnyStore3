@@ -31,7 +31,13 @@ pub fn encode_component(value: &str) -> String {
 
 /// Signs the method, path, expiry and optional download filename together, so
 /// none of them can be swapped independently.
-pub fn sign(secret: &[u8], method: &str, path: &str, expires: i64, filename: Option<&str>) -> String {
+pub fn sign(
+    secret: &[u8],
+    method: &str,
+    path: &str,
+    expires: i64,
+    filename: Option<&str>,
+) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(method.as_bytes());
     mac.update(b"\n");
@@ -70,21 +76,66 @@ mod tests {
     #[test]
     fn signatures_round_trip() {
         let sig = sign(b"secret", "GET", "blobs/u1", 100, Some("a.pdf"));
-        assert!(verify(b"secret", "GET", "blobs/u1", 100, Some("a.pdf"), &sig));
+        assert!(verify(
+            b"secret",
+            "GET",
+            "blobs/u1",
+            100,
+            Some("a.pdf"),
+            &sig
+        ));
     }
 
     #[test]
     fn every_signed_field_is_bound() {
         let sig = sign(b"secret", "GET", "blobs/u1", 100, Some("a.pdf"));
-        assert!(!verify(b"secret", "PUT", "blobs/u1", 100, Some("a.pdf"), &sig));
-        assert!(!verify(b"secret", "GET", "blobs/u2", 100, Some("a.pdf"), &sig));
-        assert!(!verify(b"secret", "GET", "blobs/u1", 101, Some("a.pdf"), &sig));
-        assert!(!verify(b"secret", "GET", "blobs/u1", 100, Some("b.pdf"), &sig));
-        assert!(!verify(b"other", "GET", "blobs/u1", 100, Some("a.pdf"), &sig));
+        assert!(!verify(
+            b"secret",
+            "PUT",
+            "blobs/u1",
+            100,
+            Some("a.pdf"),
+            &sig
+        ));
+        assert!(!verify(
+            b"secret",
+            "GET",
+            "blobs/u2",
+            100,
+            Some("a.pdf"),
+            &sig
+        ));
+        assert!(!verify(
+            b"secret",
+            "GET",
+            "blobs/u1",
+            101,
+            Some("a.pdf"),
+            &sig
+        ));
+        assert!(!verify(
+            b"secret",
+            "GET",
+            "blobs/u1",
+            100,
+            Some("b.pdf"),
+            &sig
+        ));
+        assert!(!verify(
+            b"other",
+            "GET",
+            "blobs/u1",
+            100,
+            Some("a.pdf"),
+            &sig
+        ));
     }
 
     #[test]
     fn unicode_filenames_are_encoded() {
-        assert_eq!(encode_component("报告 2026.pdf"), "%E6%8A%A5%E5%91%8A%202026.pdf");
+        assert_eq!(
+            encode_component("报告 2026.pdf"),
+            "%E6%8A%A5%E5%91%8A%202026.pdf"
+        );
     }
 }

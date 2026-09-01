@@ -4,12 +4,12 @@
 //! binary alongside the API so the upload and download paths behave like a real
 //! provider endpoint.
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 use chrono::Utc;
 use std::sync::Arc;
 
@@ -29,15 +29,11 @@ pub fn router(store: Arc<LocalFsBlobStore>) -> Router {
         .with_state(TransportState { store })
 }
 
-fn param<'a>(query: Option<&'a str>, key: &str) -> Option<String> {
+fn param(query: Option<&str>, key: &str) -> Option<String> {
     let query = query?;
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        if k == key {
-            Some(decode(v))
-        } else {
-            None
-        }
+        if k == key { Some(decode(v)) } else { None }
     })
 }
 
@@ -59,16 +55,16 @@ fn check_signature(
     method: &str,
     path: &str,
     query: Option<&str>,
-) -> Result<Option<String>, Response> {
+) -> Result<Option<String>, Box<Response>> {
     let expires: i64 = param(query, "exp")
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| deny(StatusCode::FORBIDDEN, "missing expiry"))?;
-    let signature =
-        param(query, "sig").ok_or_else(|| deny(StatusCode::FORBIDDEN, "missing signature"))?;
+        .ok_or_else(|| Box::new(deny(StatusCode::FORBIDDEN, "missing expiry")))?;
+    let signature = param(query, "sig")
+        .ok_or_else(|| Box::new(deny(StatusCode::FORBIDDEN, "missing signature")))?;
     let filename = param(query, "filename");
 
     if Utc::now().timestamp() > expires {
-        return Err(deny(StatusCode::FORBIDDEN, "signature expired"));
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "signature expired")));
     }
     if !signing::verify(
         &state.store.inner.secret,
@@ -78,7 +74,7 @@ fn check_signature(
         filename.as_deref(),
         &signature,
     ) {
-        return Err(deny(StatusCode::FORBIDDEN, "invalid signature"));
+        return Err(Box::new(deny(StatusCode::FORBIDDEN, "invalid signature")));
     }
     Ok(filename)
 }
@@ -90,7 +86,7 @@ async fn upload(
     body: Bytes,
 ) -> Response {
     if let Err(response) = check_signature(&state, "PUT", &path, query.as_deref()) {
-        return response;
+        return *response;
     }
 
     let Ok(target) = safe_join(&state.store.inner.root, &path) else {
@@ -119,7 +115,7 @@ async fn download(
 ) -> Response {
     let filename = match check_signature(&state, "GET", &path, query.as_deref()) {
         Ok(filename) => filename,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let Ok(target) = safe_join(&state.store.inner.root, &path) else {

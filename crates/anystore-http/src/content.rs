@@ -4,11 +4,11 @@
 //! the application.
 
 use anystore_application::content::ContentService;
+use axum::Extension;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use axum::Extension;
 use std::sync::Arc;
 
 use crate::HttpState;

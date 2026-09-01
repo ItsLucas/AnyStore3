@@ -50,9 +50,7 @@ async fn run() -> DomainResult<()> {
                 config.public_base_url.clone(),
                 secret.as_bytes(),
             ));
-            tracing::warn!(
-                "using the local filesystem blob backend; not suitable for production"
-            );
+            tracing::warn!("using the local filesystem blob backend; not suitable for production");
             (
                 Arc::clone(&store) as Arc<dyn BlobStore>,
                 Some(anystore_blobstore_local::router(store)),

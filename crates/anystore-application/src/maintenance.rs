@@ -3,8 +3,8 @@
 //! Internal only: no public API contract depends on it, and a failure here can
 //! never affect API correctness.
 
-use anystore_domain::error::DomainResult;
 use anystore_blobstore::{AbortBlobUpload, BlobRef};
+use anystore_domain::error::DomainResult;
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
@@ -35,22 +35,21 @@ impl MaintenanceService {
     }
 
     pub async fn run_once(&self, now: DateTime<Utc>) -> DomainResult<MaintenanceReport> {
-        let mut report = MaintenanceReport::default();
+        let uploads_expired = self.abort_expired_uploads(now).await?;
+        let (blobs_deleted, blobs_failed) = self.collect_blobs(now).await?;
 
-        report.uploads_expired = self.abort_expired_uploads(now).await?;
-        let (deleted, failed) = self.collect_blobs(now).await?;
-        report.blobs_deleted = deleted;
-        report.blobs_failed = failed;
-
-        report.idempotency_purged = self.state.meta.purge_idempotency_records(now).await?;
-        report.cursors_purged = self.state.meta.purge_change_cursors(now).await?;
-        report.changes_purged = self
-            .state
-            .meta
-            .purge_changes(now - self.state.config.changes_retention)
-            .await?;
-
-        Ok(report)
+        Ok(MaintenanceReport {
+            blobs_deleted,
+            blobs_failed,
+            uploads_expired,
+            idempotency_purged: self.state.meta.purge_idempotency_records(now).await?,
+            cursors_purged: self.state.meta.purge_change_cursors(now).await?,
+            changes_purged: self
+                .state
+                .meta
+                .purge_changes(now - self.state.config.changes_retention)
+                .await?,
+        })
     }
 
     async fn abort_expired_uploads(&self, now: DateTime<Utc>) -> DomainResult<u32> {
@@ -98,7 +97,10 @@ impl MaintenanceService {
                 }
             };
 
-            match store.delete_blob(&BlobRef::new(entry.blob_ref.clone())).await {
+            match store
+                .delete_blob(&BlobRef::new(entry.blob_ref.clone()))
+                .await
+            {
                 Ok(()) => {
                     self.state.meta.finish_gc(&entry).await?;
                     deleted += 1;

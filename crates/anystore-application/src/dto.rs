@@ -97,11 +97,7 @@ pub fn error_json(error: &DomainError, request_id: &str) -> Value {
     Value::Object(map)
 }
 
-pub fn upload_session_json(
-    upload_id: &str,
-    object_id: &str,
-    prepared: &PreparedUpload,
-) -> Value {
+pub fn upload_session_json(upload_id: &str, object_id: &str, prepared: &PreparedUpload) -> Value {
     let mut map = Map::new();
     map.insert("id".into(), json!(upload_id));
     map.insert("object_id".into(), json!(object_id));
@@ -156,8 +152,8 @@ pub fn upload_complete_json(view: &ObjectView) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anystore_domain::object::{ContentState, Object, ObjectKind, Revision};
     use anystore_domain::ObjectId;
+    use anystore_domain::object::{ContentState, Object, ObjectKind, Revision};
     use serde_json::json;
 
     fn object(kind: ObjectKind) -> ObjectView {

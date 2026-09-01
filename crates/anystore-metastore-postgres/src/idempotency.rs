@@ -138,10 +138,7 @@ pub(crate) async fn finalize_in_tx(
     Ok(())
 }
 
-async fn read_record<'e, E>(
-    executor: E,
-    ctx: &IdempotencyContext,
-) -> DomainResult<Option<PgRow>>
+async fn read_record<'e, E>(executor: E, ctx: &IdempotencyContext) -> DomainResult<Option<PgRow>>
 where
     E: PgExecutor<'e>,
 {
@@ -192,7 +189,8 @@ impl IdempotencyStore for PostgresMetaStore {
                 return Ok(IdempotencyDecision::Replay(decode_stored_response(&row)?));
             }
 
-            let lease_until: Option<DateTime<Utc>> = row.try_get("lease_until").map_err(map_sqlx)?;
+            let lease_until: Option<DateTime<Utc>> =
+                row.try_get("lease_until").map_err(map_sqlx)?;
             let lease_expired = lease_until.is_none_or(|until| until <= Utc::now());
 
             if lease_expired {

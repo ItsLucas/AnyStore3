@@ -76,6 +76,7 @@ version = "1.0.0"
 dependencies = [
  "anystore-blobstore",
  "anystore-domain",
+ "anystore-testkit",
  "async-trait",
  "axum",
  "chrono",
@@ -134,6 +135,7 @@ version = "1.0.0"
 dependencies = [
  "anystore-domain",
  "anystore-metastore",
+ "anystore-testkit",
  "async-trait",
  "chrono",
  "serde_json",
@@ -159,6 +161,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "anystore-testkit"
+version = "1.0.0"
+dependencies = [
+ "anystore-blobstore",
+ "anystore-domain",
+ "anystore-metastore",
+ "async-trait",
+ "chrono",
+ "hex",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]

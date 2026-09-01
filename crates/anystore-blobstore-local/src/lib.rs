@@ -57,7 +57,13 @@ impl LocalFsBlobStore {
         safe_join(&self.inner.root, &format!("{}.parts", blob.as_str()))
     }
 
-    fn signed_url(&self, method: &str, path: &str, expires_in: Duration, filename: Option<&str>) -> String {
+    fn signed_url(
+        &self,
+        method: &str,
+        path: &str,
+        expires_in: Duration,
+        filename: Option<&str>,
+    ) -> String {
         let expires = Utc::now().timestamp() + expires_in.as_secs() as i64;
         let signature = signing::sign(&self.inner.secret, method, path, expires, filename);
         let mut url = format!(

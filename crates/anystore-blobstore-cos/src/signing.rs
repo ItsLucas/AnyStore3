@@ -31,7 +31,10 @@ pub fn url_encode(value: &str) -> String {
 
 /// Encodes a path, preserving `/` as the segment separator.
 pub fn encode_path(path: &str) -> String {
-    path.split('/').map(url_encode).collect::<Vec<_>>().join("/")
+    path.split('/')
+        .map(url_encode)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn sha1_hex(input: &str) -> String {
@@ -143,10 +146,14 @@ mod tests {
             "response-cache-control=max-age%3D600&response-content-type=application%2Foctet-stream\n",
             "date=Thu%2C%2016%20May%202019%2006%3A55%3A53%20GMT&host=examplebucket-1250000000.cos.ap-beijing.myqcloud.com\n"
         );
-        assert_eq!(sha1_hex(http_string), "54ecfe22f59d3514fdc764b87a32d8133ea611e6");
+        assert_eq!(
+            sha1_hex(http_string),
+            "54ecfe22f59d3514fdc764b87a32d8133ea611e6"
+        );
 
         let sign_key = "937914bf490e9e8c189836aad2052e4feeb35eaf";
-        let string_to_sign = "sha1\n1557989753;1557996953\n54ecfe22f59d3514fdc764b87a32d8133ea611e6\n";
+        let string_to_sign =
+            "sha1\n1557989753;1557996953\n54ecfe22f59d3514fdc764b87a32d8133ea611e6\n";
         let signature = hmac_sha1_hex(sign_key.as_bytes(), string_to_sign);
         // The published signature masks its final characters.
         assert!(
@@ -165,10 +172,14 @@ mod tests {
             "&host=examplebucket-1250000000.cos.ap-beijing.myqcloud.com",
             "&x-cos-acl=private&x-cos-grant-read=uin%3D%22100000000011%22\n"
         );
-        assert_eq!(sha1_hex(http_string), "8b2751e77f43a0995d6e9eb9477f4b685cca4172");
+        assert_eq!(
+            sha1_hex(http_string),
+            "8b2751e77f43a0995d6e9eb9477f4b685cca4172"
+        );
 
         let sign_key = "eb2519b498b02ac213cb1f3d1a3d27a3b3c9bc5f";
-        let string_to_sign = "sha1\n1557989151;1557996351\n8b2751e77f43a0995d6e9eb9477f4b685cca4172\n";
+        let string_to_sign =
+            "sha1\n1557989151;1557996351\n8b2751e77f43a0995d6e9eb9477f4b685cca4172\n";
         let signature = hmac_sha1_hex(sign_key.as_bytes(), string_to_sign);
         assert!(
             signature.starts_with("3b8851a11a569213c17ba8fa7dcf2abec693"),

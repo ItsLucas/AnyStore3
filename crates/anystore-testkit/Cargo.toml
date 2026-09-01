@@ -1,5 +1,5 @@
 [package]
-name = "anystore-blobstore-local"
+name = "anystore-testkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,17 +7,13 @@ license.workspace = true
 
 [dependencies]
 anystore-domain.workspace = true
+anystore-metastore.workspace = true
 anystore-blobstore.workspace = true
 async-trait.workspace = true
-axum.workspace = true
 chrono.workspace = true
-hex.workspace = true
-hmac.workspace = true
-percent-encoding.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
-anystore-testkit.workspace = true
 tokio.workspace = true

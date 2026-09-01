@@ -1,10 +1,10 @@
 //! Changes feed handler.
 
 use anystore_application::changes::ChangeService;
+use axum::Extension;
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::Extension;
 use chrono::Utc;
 use std::sync::Arc;
 
