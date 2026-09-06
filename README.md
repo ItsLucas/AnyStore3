@@ -276,6 +276,10 @@ idempotency scope is unaffected by enabling it.
 
 ### CloudBase PostgreSQL
 
+Copy `cloudbaserc.example.json` to the ignored `cloudbaserc.json` and set your
+own environment ID before using CloudBase tooling. Keep deployment-specific
+configuration local.
+
 Migrations live in two places, deliberately:
 
 | Path | Applied by | Contents |

@@ -1,14 +1,14 @@
 # AnyStore v1 API 接入指南
 
-本文档面向 AnyStore 的业务接入方，描述**当前已实现并部署**的 v1 API。
+本文档面向 AnyStore 的业务接入方，描述当前已实现的 v1 API。部署地址和访问凭据由服务管理方另行提供。
 
 ## 1. 接入信息
 
 | 项目 | 值 |
 |---|---|
-| 服务状态 | 已部署 |
+| 服务状态 | 由服务管理方确认 |
 | API 版本 | v1 |
-| API Base URL | `https://your-api.example.com/api/v1` |
+| API Base URL | `https://your-api.example.com/api/v1`（替换为自己的部署地址） |
 | 数据格式 | JSON |
 | 字符编码 | UTF-8 |
 | 文件存储 | 腾讯云 COS，客户端通过临时签名 URL 直传、直下 |
@@ -1067,6 +1067,7 @@ https://your-api.example.com/healthz
 
 ```bash
 cd AnyStore3
+export ANYSTORE_TEST_BASE_URL='https://your-api.example.com/api/v1'
 tests/run_remote.sh
 ```
 

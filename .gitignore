@@ -1,6 +1,7 @@
 /target
 *.log
 /.anystore-blobs
+/cloudbaserc.json
 
 # Local credentials and environment overrides.
 .env

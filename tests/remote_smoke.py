@@ -12,10 +12,7 @@ import urllib.request
 import uuid
 from typing import Any
 
-BASE = os.environ.get(
-    "ANYSTORE_TEST_BASE_URL",
-    "https://your-api.example.com/api/v1",
-).rstrip("/")
+BASE = os.environ.get("ANYSTORE_TEST_BASE_URL", "").rstrip("/")
 ORIGIN = BASE.removesuffix("/api/v1")
 TOKEN = os.environ.get("ANYSTORE_TEST_AUTH_TOKEN", "").strip()
 RUN = uuid.uuid4().hex[:10]
@@ -73,6 +70,9 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> int:
+    if not BASE:
+        print("ANYSTORE_TEST_BASE_URL is required", file=sys.stderr)
+        return 2
     if not TOKEN:
         print("ANYSTORE_TEST_AUTH_TOKEN is required", file=sys.stderr)
         return 2

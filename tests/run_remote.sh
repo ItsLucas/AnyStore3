@@ -16,8 +16,13 @@ set -a
 source "$SECRETS_FILE"
 set +a
 
-export ANYSTORE_TEST_BASE_URL="${ANYSTORE_TEST_BASE_URL:-https://your-api.example.com/api/v1}"
+export ANYSTORE_TEST_BASE_URL="${ANYSTORE_TEST_BASE_URL:-}"
 export ANYSTORE_TEST_AUTH_TOKEN="${ANYSTORE_TEST_AUTH_TOKEN:-${ANYSTORE_AUTH_TOKEN:-}}"
+
+if [[ -z "$ANYSTORE_TEST_BASE_URL" ]]; then
+    echo "ANYSTORE_TEST_BASE_URL is required" >&2
+    exit 2
+fi
 
 if [[ -z "$ANYSTORE_TEST_AUTH_TOKEN" ]]; then
     echo "ANYSTORE_AUTH_TOKEN or ANYSTORE_TEST_AUTH_TOKEN is required" >&2
