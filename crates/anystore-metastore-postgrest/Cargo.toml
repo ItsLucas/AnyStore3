@@ -1,0 +1,29 @@
+[package]
+name = "anystore-metastore-postgrest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anystore-domain.workspace = true
+anystore-metastore.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+anystore-application.workspace = true
+anystore-metastore-postgres.workspace = true
+anystore-testkit.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

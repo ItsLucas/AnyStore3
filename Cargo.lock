@@ -59,6 +59,7 @@ version = "1.0.0"
 dependencies = [
  "anystore-blobstore",
  "anystore-domain",
+ "anystore-testkit",
  "async-trait",
  "chrono",
  "hex",
@@ -67,6 +68,7 @@ dependencies = [
  "quick-xml",
  "reqwest",
  "sha1 0.10.7",
+ "tokio",
  "tracing",
 ]
 
@@ -145,6 +147,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "anystore-metastore-postgrest"
+version = "1.0.0"
+dependencies = [
+ "anystore-application",
+ "anystore-domain",
+ "anystore-metastore",
+ "anystore-metastore-postgres",
+ "anystore-testkit",
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "anystore-server"
 version = "1.0.0"
 dependencies = [
@@ -156,6 +178,7 @@ dependencies = [
  "anystore-http",
  "anystore-metastore",
  "anystore-metastore-postgres",
+ "anystore-metastore-postgrest",
  "axum",
  "chrono",
  "tokio",

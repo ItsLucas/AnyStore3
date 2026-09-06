@@ -4,10 +4,11 @@
 //! provider access, verifies completion and commits metadata.
 
 use anystore_blobstore::{
-    AbortBlobUpload, CompleteBlobUpload, CompletedPart, PrepareUpload, SignParts,
+    AbortBlobUpload, BlobRef, CompleteBlobUpload, CompletedPart, PrepareUpload, PreparedUpload,
+    SignParts,
 };
 use anystore_domain::error::{DomainError, DomainResult};
-use anystore_domain::upload::{UploadMode, UploadRecord, UploadState};
+use anystore_domain::upload::{UploadMode, UploadState, validate_sha256};
 use anystore_domain::{ObjectId, UploadId};
 use anystore_metastore::commands::{CommitContent, MutationOutcome};
 use anystore_metastore::response::{ResponseRenderer, StoredResponse};
@@ -76,51 +77,39 @@ impl UploadService {
         Self { state }
     }
 
-    async fn load_active_upload(&self, id: &UploadId) -> DomainResult<UploadRecord> {
-        let upload = self
-            .state
-            .meta
-            .get_upload(id)
-            .await?
-            .ok_or(DomainError::UploadNotFound)?;
-        if matches!(upload.state, UploadState::Aborted | UploadState::Expired) {
-            return Err(DomainError::UploadNotFound);
-        }
-        Ok(upload)
-    }
-
     pub async fn create(
         &self,
         req: CreateUploadRequest,
         ctx: &RequestContext,
     ) -> DomainResult<StoredResponse> {
-        let target = self
-            .state
-            .meta
-            .get_object(&req.object_id)
-            .await?
-            .ok_or(DomainError::ObjectNotFound)?;
-        if !target.object.is_file() {
-            return Err(DomainError::NotAFile);
-        }
-
-        let content_type = req
-            .content_type
-            .or_else(|| target.object.content_type.clone())
-            .unwrap_or_else(|| "application/octet-stream".to_owned());
-
-        let config = self.state.config.clone();
-        let mode = if req.size > config.multipart_threshold {
-            UploadMode::Multipart
-        } else {
-            UploadMode::Single
-        };
-
         let state = Arc::clone(&self.state);
         idempotency::run_with_completion(&state, ctx, |ictx| {
             let state = Arc::clone(&state);
             let ctx = ctx.clone();
             async move {
+                let target = state
+                    .meta
+                    .get_object(&req.object_id)
+                    .await?
+                    .ok_or(DomainError::ObjectNotFound)?;
+                if !target.object.is_file() {
+                    return Err(DomainError::NotAFile);
+                }
+                if let Some(sha256) = &req.sha256 {
+                    validate_sha256(sha256)?;
+                }
+
+                let content_type = req
+                    .content_type
+                    .or_else(|| target.object.content_type.clone())
+                    .unwrap_or_else(|| "application/octet-stream".to_owned());
+                let config = state.config.clone();
+                let mode = if req.size > config.multipart_threshold {
+                    UploadMode::Multipart
+                } else {
+                    UploadMode::Single
+                };
+
                 // Deriving the id from the idempotency scope makes a retry after
                 // a crash resume the same session instead of creating a second.
                 let upload_id = match &ictx {
@@ -133,7 +122,7 @@ impl UploadService {
 
                 // The row is written before the provider is contacted, so a
                 // crash leaves a record the maintenance sweep can clean up.
-                state
+                let created = state
                     .meta
                     .create_upload_record(CreateUploadRecord {
                         id: upload_id.clone(),
@@ -148,33 +137,71 @@ impl UploadService {
                         expires_at: ctx.now + config.upload_expiry,
                     })
                     .await?;
-                Metrics::incr(&state.metrics.upload_sessions_total);
+                if created.created {
+                    Metrics::incr(&state.metrics.upload_sessions_total);
+                }
+                let upload = created.upload;
 
-                let prepared = blobs
-                    .prepare_upload(PrepareUpload {
-                        upload_id: upload_id.as_str().to_owned(),
-                        mode,
-                        expected_size: req.size,
-                        content_type: content_type.clone(),
-                        expected_sha256: req.sha256.clone(),
-                        part_size: config.part_size,
-                        expires_in: to_std(config.upload_url_expiry),
-                    })
-                    .await?;
+                let prepared = match upload.state {
+                    UploadState::Initiating => {
+                        let prepared = blobs
+                            .prepare_upload(PrepareUpload {
+                                upload_id: upload.id.to_string(),
+                                mode: upload.mode,
+                                expected_size: upload.expected_size,
+                                content_type: upload.content_type.clone(),
+                                expected_sha256: upload.expected_sha256.clone(),
+                                part_size: config.part_size,
+                                expires_in: to_std(config.upload_url_expiry),
+                            })
+                            .await?;
 
-                state
-                    .meta
-                    .update_upload_state(UpdateUploadState {
-                        id: upload_id.clone(),
-                        state: UploadState::Ready,
-                        provider_upload_id: prepared.provider_upload_id.clone(),
-                        provider_completed: None,
-                    })
-                    .await?;
+                        state
+                            .meta
+                            .update_upload_state(UpdateUploadState {
+                                id: upload.id.clone(),
+                                state: UploadState::Ready,
+                                provider_upload_id: prepared.provider_upload_id.clone(),
+                                provider_completed: None,
+                            })
+                            .await?;
+                        prepared
+                    }
+                    UploadState::Ready | UploadState::Completing => match upload.mode {
+                        // Single-shot preparation only signs the deterministic
+                        // blob location, so it is safe to mint a replacement URL.
+                        UploadMode::Single => {
+                            blobs
+                                .prepare_upload(PrepareUpload {
+                                    upload_id: upload.id.to_string(),
+                                    mode: upload.mode,
+                                    expected_size: upload.expected_size,
+                                    content_type: upload.content_type.clone(),
+                                    expected_sha256: upload.expected_sha256.clone(),
+                                    part_size: config.part_size,
+                                    expires_in: to_std(config.upload_url_expiry),
+                                })
+                                .await?
+                        }
+                        // Multipart preparation creates provider state. Reuse
+                        // the persisted provider id instead of creating another.
+                        UploadMode::Multipart => PreparedUpload {
+                            blob_ref: BlobRef::new(upload.blob_ref.clone()),
+                            mode: upload.mode,
+                            provider_upload_id: upload.provider_upload_id.clone(),
+                            single: None,
+                            part_size: Some(config.part_size),
+                            expires_at: ctx.now + config.upload_url_expiry,
+                        },
+                    },
+                    UploadState::Completed | UploadState::Aborted | UploadState::Expired => {
+                        return Err(DomainError::UploadNotFound);
+                    }
+                };
 
                 let body = serde_json::to_vec(&upload_session_json(
-                    upload_id.as_str(),
-                    req.object_id.as_str(),
+                    upload.id.as_str(),
+                    upload.object_id.as_str(),
                     &prepared,
                 ))
                 .map_err(|e| DomainError::internal(format!("response encoding failed: {e}")))?;
@@ -191,49 +218,54 @@ impl UploadService {
         req: AllocatePartsRequest,
         ctx: &RequestContext,
     ) -> DomainResult<StoredResponse> {
-        let upload = self.load_active_upload(&id).await?;
-        if upload.mode != UploadMode::Multipart {
-            return Err(DomainError::InvalidRequest(
-                "This upload session is not multipart.".into(),
-            ));
-        }
-        if req.part_numbers.is_empty() {
-            return Err(DomainError::InvalidRequest(
-                "part_numbers must not be empty.".into(),
-            ));
-        }
-        if req.part_numbers.len() > self.state.config.max_part_numbers {
-            return Err(DomainError::InvalidRequest(
-                "Too many part numbers requested.".into(),
-            ));
-        }
-        if req
-            .part_numbers
-            .iter()
-            .any(|n| *n == 0 || *n > MAX_PART_NUMBER)
-        {
-            return Err(DomainError::InvalidRequest(format!(
-                "part_numbers must be between 1 and {MAX_PART_NUMBER}."
-            )));
-        }
-
-        let provider_upload_id = upload
-            .provider_upload_id
-            .clone()
-            .ok_or_else(|| DomainError::internal("multipart upload has no provider id"))?;
-
         let state = Arc::clone(&self.state);
-        let config = state.config.clone();
         idempotency::run_with_completion(&state, ctx, |_ictx| {
             let state = Arc::clone(&state);
             async move {
+                let upload = state
+                    .meta
+                    .get_upload(&id)
+                    .await?
+                    .ok_or(DomainError::UploadNotFound)?;
+                if matches!(upload.state, UploadState::Aborted | UploadState::Expired) {
+                    return Err(DomainError::UploadNotFound);
+                }
+                if upload.mode != UploadMode::Multipart {
+                    return Err(DomainError::InvalidRequest(
+                        "This upload session is not multipart.".into(),
+                    ));
+                }
+                if req.part_numbers.is_empty() {
+                    return Err(DomainError::InvalidRequest(
+                        "part_numbers must not be empty.".into(),
+                    ));
+                }
+                if req.part_numbers.len() > state.config.max_part_numbers {
+                    return Err(DomainError::InvalidRequest(
+                        "Too many part numbers requested.".into(),
+                    ));
+                }
+                if req
+                    .part_numbers
+                    .iter()
+                    .any(|n| *n == 0 || *n > MAX_PART_NUMBER)
+                {
+                    return Err(DomainError::InvalidRequest(format!(
+                        "part_numbers must be between 1 and {MAX_PART_NUMBER}."
+                    )));
+                }
+
+                let provider_upload_id = upload
+                    .provider_upload_id
+                    .clone()
+                    .ok_or_else(|| DomainError::internal("multipart upload has no provider id"))?;
                 let blobs = state.blobs.get(&upload.blob_backend)?;
                 let parts = blobs
                     .sign_parts(SignParts {
                         blob_ref: anystore_blobstore::BlobRef::new(upload.blob_ref.clone()),
                         provider_upload_id,
                         part_numbers: req.part_numbers,
-                        expires_in: to_std(config.upload_url_expiry),
+                        expires_in: to_std(state.config.upload_url_expiry),
                     })
                     .await?;
 
@@ -285,6 +317,28 @@ impl UploadService {
                     return Err(DomainError::RevisionConflict {
                         current_revision: target.object.revision.get(),
                     });
+                }
+
+                if upload.state == UploadState::Completed {
+                    return state
+                        .meta
+                        .commit_content(CommitContent {
+                            upload_id: id.clone(),
+                            object_id: upload.object_id.clone(),
+                            if_match: ctx.if_match,
+                            blob_backend: upload.blob_backend.clone(),
+                            blob_ref: upload.blob_ref.clone(),
+                            size: target.object.size.ok_or_else(|| {
+                                DomainError::internal("completed upload target has no size")
+                            })?,
+                            content_type: target.object.content_type.clone().ok_or_else(|| {
+                                DomainError::internal("completed upload target has no content type")
+                            })?,
+                            sha256: target.object.sha256.clone(),
+                            gc_not_before: ctx.now + config.gc_grace,
+                            ctx: mutation_context(&ctx, &state, ictx, render_upload_complete()),
+                        })
+                        .await;
                 }
 
                 state

@@ -47,6 +47,16 @@ struct BuiltPage {
     page_end_seq: i64,
     snapshot_max_seq: i64,
     has_more: bool,
+    lag: u64,
+}
+
+async fn count_changes_after(conn: &mut PgConnection, after_seq: i64) -> DomainResult<u64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM changes WHERE seq > $1")
+        .bind(after_seq)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(count as u64)
 }
 
 /// Computes the page bounded by `(after_seq, snapshot_max_seq]`.
@@ -89,12 +99,14 @@ async fn build_page(
             .fetch_one(&mut *conn)
             .await
             .map_err(map_sqlx)?;
+    let lag = count_changes_after(conn, page_end_seq).await?;
 
     Ok(BuiltPage {
         items: decoded.into_iter().map(|(_, record)| record).collect(),
         page_end_seq,
         snapshot_max_seq,
         has_more,
+        lag,
     })
 }
 
@@ -144,6 +156,7 @@ impl ChangeStore for PostgresMetaStore {
                     items: built.items,
                     next_cursor: next,
                     has_more: built.has_more,
+                    lag: built.lag,
                 }
             }
             Some(cursor) => {
@@ -199,11 +212,13 @@ impl ChangeStore for PostgresMetaStore {
                         .iter()
                         .map(|r| decode_change(r).map(|(_, record)| record))
                         .collect::<DomainResult<Vec<ChangeRecord>>>()?;
+                    let lag = count_changes_after(&mut tx, page_end_seq).await?;
 
                     ChangePage {
                         items,
                         next_cursor: CursorId::new(next_cursor_id),
                         has_more,
+                        lag,
                     }
                 } else {
                     let built = build_page(&mut tx, after_seq, req.limit).await?;
@@ -235,6 +250,7 @@ impl ChangeStore for PostgresMetaStore {
                         items: built.items,
                         next_cursor: next,
                         has_more: built.has_more,
+                        lag: built.lag,
                     }
                 }
             }

@@ -4,19 +4,21 @@ use anystore_domain::change::ChangeAction;
 use anystore_domain::error::DomainResult;
 use anystore_domain::metadata::MetadataPatch;
 use anystore_domain::object::{ObjectKind, Revision};
-use anystore_domain::{IdempotencyKey, ObjectId, PrincipalId, RequestId};
+use anystore_domain::upload::{UploadMode, UploadState};
+use anystore_domain::{IdempotencyKey, ObjectId, PrincipalId, RequestId, UploadId};
 use anystore_metastore::changes::ReadChanges;
 use anystore_metastore::commands::{
     CommitContent, CreateObjectCommit, DeleteObjectCommit, ListChildren, ListOrder,
     MetadataCondition, MutationContext, MutationOutcome, ObjectQuery, OrderBy, PatchObjectCommit,
 };
 use anystore_metastore::idempotency::{
-    IdempotencyAcquire, IdempotencyContext, IdempotencyDecision,
+    IdempotencyAcquire, IdempotencyComplete, IdempotencyContext, IdempotencyDecision,
 };
 use anystore_metastore::response::{ResponseRenderer, StoredResponse};
+use anystore_metastore::uploads::{CreateUploadRecord, UpdateUploadState};
 use anystore_metastore::{
     ChangeStore, IdempotencyStore, MaintenanceStore, MetaStore, ObjectMutationStore,
-    ObjectRepository,
+    ObjectRepository, UploadRepository,
 };
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -59,6 +61,7 @@ fn context(key: Option<&str>) -> (MutationContext, Option<IdempotencyContext>) {
         key: IdempotencyKey::new(key),
         request_hash: format!("hash-of-{key}"),
         owner_token: format!("owner-{key}"),
+        resource_token: now.timestamp_micros().to_string(),
     });
 
     (
@@ -88,7 +91,7 @@ async fn claim<M: MetaStore + ?Sized>(store: &M, ictx: &Option<IdempotencyContex
         .await
         .expect("acquire must not fail");
     assert!(
-        matches!(decision, IdempotencyDecision::Owner),
+        matches!(decision, IdempotencyDecision::Owner { .. }),
         "the first attempt must own the key"
     );
 }
@@ -141,6 +144,41 @@ async fn create_file<M: MetaStore + ?Sized>(
         })
         .await?;
     Ok(id)
+}
+
+async fn create_ready_upload<M: MetaStore + ?Sized>(
+    store: &M,
+    object_id: &ObjectId,
+    blob_ref: &str,
+    expires_at: chrono::DateTime<Utc>,
+) -> UploadId {
+    let id = UploadId::generate();
+    let created = store
+        .create_upload_record(CreateUploadRecord {
+            id: id.clone(),
+            object_id: object_id.clone(),
+            mode: UploadMode::Single,
+            blob_backend: "test".into(),
+            blob_ref: blob_ref.to_owned(),
+            expected_size: 11,
+            content_type: "text/plain".into(),
+            expected_sha256: Some("a".repeat(64)),
+            created_at: Utc::now(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    assert!(created.created);
+    store
+        .update_upload_state(UpdateUploadState {
+            id: id.clone(),
+            state: UploadState::Ready,
+            provider_upload_id: None,
+            provider_completed: None,
+        })
+        .await
+        .unwrap();
+    id
 }
 
 async fn revision_of<M: MetaStore + ?Sized>(store: &M, id: &ObjectId) -> Revision {
@@ -851,12 +889,14 @@ pub async fn content_commit_selects_the_right_action<F: MetaStoreFactory>(factor
         ("blobs/one", ChangeAction::ContentReady),
         ("blobs/two", ChangeAction::ContentReplaced),
     ] {
+        let upload_id =
+            create_ready_upload(&*store, &id, blob, Utc::now() + Duration::hours(1)).await;
         let revision = revision_of(&*store, &id).await;
         let (ctx, ictx) = context(None);
         claim(&*store, &ictx).await;
         store
             .commit_content(CommitContent {
-                upload_id: anystore_domain::UploadId::generate(),
+                upload_id,
                 object_id: id.clone(),
                 if_match: Some(revision),
                 blob_backend: "test".into(),
@@ -891,6 +931,208 @@ pub async fn content_commit_selects_the_right_action<F: MetaStoreFactory>(factor
         !pending.iter().any(|e| e.blob_ref == "blobs/two"),
         "a live blob is never collectable"
     );
+}
+
+pub async fn upload_creation_resumes_the_existing_record<F: MetaStoreFactory>(factory: &F) {
+    let store = factory.create().await;
+    let object_id = create_file(&*store, "resume.bin", &ObjectId::root(), json!({}))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let command = CreateUploadRecord {
+        id: UploadId::generate(),
+        object_id,
+        mode: UploadMode::Multipart,
+        blob_backend: "test".into(),
+        blob_ref: "blobs/resume".into(),
+        expected_size: 42,
+        content_type: "application/octet-stream".into(),
+        expected_sha256: None,
+        created_at: now,
+        expires_at: now + Duration::hours(1),
+    };
+
+    let first = store.create_upload_record(command.clone()).await.unwrap();
+    let second = store.create_upload_record(command).await.unwrap();
+    assert!(first.created);
+    assert!(!second.created);
+    assert_eq!(second.upload, first.upload);
+}
+
+pub async fn resource_token_changes_after_idempotency_retention<F: MetaStoreFactory>(factory: &F) {
+    let store = factory.create().await;
+    let now = Utc::now();
+    let first_context = IdempotencyContext {
+        principal_id: PrincipalId::local(),
+        operation: "POST /uploads".into(),
+        key: IdempotencyKey::new("retained-key"),
+        request_hash: "same-request".into(),
+        owner_token: "owner-one".into(),
+        resource_token: String::new(),
+    };
+    let first = store
+        .acquire(IdempotencyAcquire {
+            context: first_context.clone(),
+            now,
+            lease_until: now + Duration::seconds(30),
+            expires_at: now + Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+    let first_token = match first {
+        IdempotencyDecision::Owner { resource_token } => resource_token,
+        other => panic!("expected owner, got {other:?}"),
+    };
+    store
+        .complete(IdempotencyComplete {
+            context: first_context,
+            response: StoredResponse::no_content(),
+            now,
+            expires_at: now + Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .purge_idempotency_records(now + Duration::seconds(2))
+            .await
+            .unwrap(),
+        1
+    );
+
+    let second_context = IdempotencyContext {
+        principal_id: PrincipalId::local(),
+        operation: "POST /uploads".into(),
+        key: IdempotencyKey::new("retained-key"),
+        request_hash: "same-request".into(),
+        owner_token: "owner-two".into(),
+        resource_token: String::new(),
+    };
+    let second = store
+        .acquire(IdempotencyAcquire {
+            context: second_context,
+            now: now + Duration::seconds(3),
+            lease_until: now + Duration::seconds(33),
+            expires_at: now + Duration::hours(24),
+        })
+        .await
+        .unwrap();
+    let second_token = match second {
+        IdempotencyDecision::Owner { resource_token } => resource_token,
+        other => panic!("expected owner, got {other:?}"),
+    };
+    assert_ne!(first_token, second_token);
+}
+
+pub async fn completed_upload_commit_is_convergent<F: MetaStoreFactory>(factory: &F) {
+    let store = factory.create().await;
+    let object_id = create_file(&*store, "repeat.bin", &ObjectId::root(), json!({}))
+        .await
+        .unwrap();
+    let upload_id = create_ready_upload(
+        &*store,
+        &object_id,
+        "blobs/repeat",
+        Utc::now() + Duration::hours(1),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let (ctx, ictx) = context(None);
+        claim(&*store, &ictx).await;
+        store
+            .commit_content(CommitContent {
+                upload_id: upload_id.clone(),
+                object_id: object_id.clone(),
+                if_match: None,
+                blob_backend: "test".into(),
+                blob_ref: "blobs/repeat".into(),
+                size: 11,
+                content_type: "text/plain".into(),
+                sha256: Some("a".repeat(64)),
+                gc_not_before: Utc::now(),
+                ctx,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(revision_of(&*store, &object_id).await, Revision(2));
+    let changes = changes_for(&*store, &object_id).await;
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|change| change.action == ChangeAction::ContentReady)
+            .count(),
+        1
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.action != ChangeAction::ContentReplaced)
+    );
+}
+
+pub async fn expired_upload_cannot_commit_content<F: MetaStoreFactory>(factory: &F) {
+    let store = factory.create().await;
+    let object_id = create_file(&*store, "expired.bin", &ObjectId::root(), json!({}))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let upload_id = create_ready_upload(
+        &*store,
+        &object_id,
+        "blobs/expired",
+        now - Duration::seconds(1),
+    )
+    .await;
+
+    let expired = store.claim_expired_uploads(now, 10).await.unwrap();
+    assert_eq!(expired.len(), 1);
+
+    let (ctx, ictx) = context(None);
+    claim(&*store, &ictx).await;
+    let error = store
+        .commit_content(CommitContent {
+            upload_id,
+            object_id: object_id.clone(),
+            if_match: None,
+            blob_backend: "test".into(),
+            blob_ref: "blobs/expired".into(),
+            size: 11,
+            content_type: "text/plain".into(),
+            sha256: Some("a".repeat(64)),
+            gc_not_before: now,
+            ctx,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "upload_not_found");
+    assert!(
+        !store
+            .get_object(&object_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .object
+            .has_ready_content()
+    );
+}
+
+pub async fn purge_changes_reports_the_deleted_row_count<F: MetaStoreFactory>(factory: &F) {
+    let store = factory.create().await;
+    create_file(&*store, "purge-a", &ObjectId::root(), json!({}))
+        .await
+        .unwrap();
+    create_file(&*store, "purge-b", &ObjectId::root(), json!({}))
+        .await
+        .unwrap();
+
+    let purged = store
+        .purge_changes(Utc::now() + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(purged, 2);
 }
 
 pub async fn paths_and_listing_reflect_the_tree<F: MetaStoreFactory>(factory: &F) {
@@ -991,6 +1233,11 @@ pub async fn run_all<F: MetaStoreFactory>(factory: &F) {
     metadata_eq_and_exists_filter_correctly(factory).await;
     deleted_objects_leave_every_read_path(factory).await;
     content_commit_selects_the_right_action(factory).await;
+    upload_creation_resumes_the_existing_record(factory).await;
+    resource_token_changes_after_idempotency_retention(factory).await;
+    completed_upload_commit_is_convergent(factory).await;
+    expired_upload_cannot_commit_content(factory).await;
+    purge_changes_reports_the_deleted_row_count(factory).await;
     paths_and_listing_reflect_the_tree(factory).await;
     listing_paginates_without_gaps_or_repeats(factory).await;
 }

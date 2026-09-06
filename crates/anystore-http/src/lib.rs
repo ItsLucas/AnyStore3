@@ -17,16 +17,19 @@ pub use error::error_response;
 pub use metrics::Metrics;
 pub use middleware::AuthConfig;
 
+use crate::error::status_error_response;
+use crate::request::RequestMeta;
 use anystore_application::{AppState, Metrics as AppMetrics};
 use anystore_domain::RequestId;
 use anystore_domain::error::{DomainError, DomainResult};
+use axum::Extension;
 use axum::Router;
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use std::future::Future;
 use std::sync::Arc;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::limit::RequestBodyLimitLayer;
 
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
@@ -38,6 +41,24 @@ pub struct HttpState {
 
 /// Maximum JSON request body. Metadata is untrusted input, so it is bounded.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+async fn not_found(Extension(meta): Extension<RequestMeta>) -> Response {
+    status_error_response(
+        StatusCode::NOT_FOUND,
+        "invalid_request",
+        "Route not found.",
+        &meta.request_id,
+    )
+}
+
+async fn method_not_allowed(Extension(meta): Extension<RequestMeta>) -> Response {
+    status_error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "invalid_request",
+        "Method not allowed.",
+        &meta.request_id,
+    )
+}
 
 /// Runs a handler body and converts a domain error into the contract's error
 /// envelope, recording the matching metric on the way out.
@@ -89,11 +110,12 @@ pub fn router(state: HttpState) -> Router {
         .nest("/api/v1", api)
         .route("/healthz", get(middleware::healthz))
         .route("/metrics", get(metrics::render))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(CatchPanicLayer::new())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::pipeline,
         ))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .layer(CatchPanicLayer::new())
         .with_state(state)
 }

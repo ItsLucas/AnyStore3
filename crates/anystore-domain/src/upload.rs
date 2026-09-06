@@ -4,6 +4,16 @@ use crate::ids::{ObjectId, UploadId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub fn validate_sha256(value: &str) -> crate::error::DomainResult<()> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(crate::error::DomainError::InvalidRequest(
+            "sha256 must be a 64-character hexadecimal digest.".into(),
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UploadMode {
@@ -120,5 +130,13 @@ mod tests {
         ] {
             assert_eq!(UploadState::parse(s.as_str()), Some(s));
         }
+    }
+
+    #[test]
+    fn sha256_requires_a_full_hex_digest() {
+        assert!(validate_sha256(&"a".repeat(64)).is_ok());
+        assert!(validate_sha256(&"A".repeat(64)).is_ok());
+        assert!(validate_sha256("not-a-hash").is_err());
+        assert!(validate_sha256(&"g".repeat(64)).is_err());
     }
 }

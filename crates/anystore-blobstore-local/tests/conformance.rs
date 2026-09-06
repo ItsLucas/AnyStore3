@@ -37,8 +37,9 @@ impl BlobUploader for FsUploader {
         self.write(&request.url, bytes).await;
     }
 
-    async fn put_part(&self, part: &SignedPart, bytes: &[u8]) {
+    async fn put_part(&self, part: &SignedPart, bytes: &[u8]) -> String {
         self.write(&part.url, bytes).await;
+        format!("local-etag-{}", part.part_number)
     }
 }
 

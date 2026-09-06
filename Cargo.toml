@@ -5,6 +5,7 @@ members = [
     "crates/anystore-metastore",
     "crates/anystore-blobstore",
     "crates/anystore-metastore-postgres",
+    "crates/anystore-metastore-postgrest",
     "crates/anystore-application",
     "crates/anystore-http",
     "crates/anystore-blobstore-local",
@@ -26,6 +27,7 @@ anystore-blobstore = { path = "crates/anystore-blobstore" }
 anystore-application = { path = "crates/anystore-application" }
 anystore-http = { path = "crates/anystore-http" }
 anystore-metastore-postgres = { path = "crates/anystore-metastore-postgres" }
+anystore-metastore-postgrest = { path = "crates/anystore-metastore-postgrest" }
 anystore-blobstore-cos = { path = "crates/anystore-blobstore-cos" }
 anystore-blobstore-local = { path = "crates/anystore-blobstore-local" }
 anystore-testkit = { path = "crates/anystore-testkit" }

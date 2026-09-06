@@ -8,10 +8,12 @@ use anystore_blobstore_cos::{CosConfig, TencentCosBlobStore};
 use anystore_blobstore_local::LocalFsBlobStore;
 use anystore_domain::error::DomainResult;
 use anystore_http::{AuthConfig, HttpState};
+use anystore_metastore::MetaStore;
 use anystore_metastore_postgres::{PoolConfig, PostgresMetaStore};
+use anystore_metastore_postgrest::PostgrestMetaStore;
 use axum::Router;
 use chrono::Utc;
-use config::{BlobBackend, ServerConfig};
+use config::{BlobBackend, DatabaseBackend, ServerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -34,12 +36,7 @@ async fn run() -> DomainResult<()> {
 
     let config = ServerConfig::from_env()?;
 
-    let meta = PostgresMetaStore::connect(&config.database_url, PoolConfig::default()).await?;
-    if config.migrate_on_start {
-        meta.migrate().await?;
-    }
-    // Schema is verified before any traffic is served.
-    meta.check_schema().await?;
+    let meta = connect_meta_store(&config.database).await?;
 
     let (blob_store, dev_router): (Arc<dyn BlobStore>, Option<Router>) = match &config.blob_backend
     {
@@ -59,7 +56,6 @@ async fn run() -> DomainResult<()> {
         BlobBackend::TencentCos {
             bucket,
             endpoint,
-            region,
             secret_id,
             secret_key,
             session_token,
@@ -67,7 +63,6 @@ async fn run() -> DomainResult<()> {
             let store = TencentCosBlobStore::new(CosConfig {
                 bucket: bucket.clone(),
                 endpoint: endpoint.clone(),
-                region: region.clone(),
                 secret_id: secret_id.clone(),
                 secret_key: secret_key.clone(),
                 session_token: session_token.clone(),
@@ -78,7 +73,7 @@ async fn run() -> DomainResult<()> {
 
     let metrics = Arc::new(Metrics::new());
     let app = Arc::new(AppState::new(
-        Arc::new(meta),
+        meta,
         Arc::new(BlobRegistry::new(blob_store)),
         config.app.clone(),
         Arc::clone(&metrics),
@@ -115,6 +110,35 @@ async fn run() -> DomainResult<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| anystore_domain::error::DomainError::internal(format!("serve failed: {e}")))
+}
+
+/// Builds the configured `MetaStore` and verifies its schema before any traffic
+/// is served.
+///
+/// The application only ever sees the port, so which adapter answers is a
+/// deployment decision rather than a code path anything else depends on.
+async fn connect_meta_store(backend: &DatabaseBackend) -> DomainResult<Arc<dyn MetaStore>> {
+    match backend {
+        DatabaseBackend::Postgres {
+            url,
+            migrate_on_start,
+        } => {
+            let meta = PostgresMetaStore::connect(url, PoolConfig::default()).await?;
+            if *migrate_on_start {
+                meta.migrate().await?;
+            }
+            meta.check_schema().await?;
+            Ok(Arc::new(meta))
+        }
+        DatabaseBackend::CloudBasePostgrest(config) => {
+            let meta = PostgrestMetaStore::connect(config.clone())?;
+            // The gateway offers no migration channel, so a missing RPC surface
+            // must fail startup rather than every request.
+            meta.check_schema().await?;
+            tracing::info!(endpoint = %meta.endpoint(), "using CloudBase PostgreSQL over PostgREST");
+            Ok(Arc::new(meta))
+        }
+    }
 }
 
 /// Runs maintenance on a schedule. Failures are logged and never surfaced to

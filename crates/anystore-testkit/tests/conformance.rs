@@ -43,12 +43,13 @@ impl BlobUploader for MemoryUploader {
         self.store.put(&blob_from_url(&request.url), bytes);
     }
 
-    async fn put_part(&self, part: &SignedPart, bytes: &[u8]) {
+    async fn put_part(&self, part: &SignedPart, bytes: &[u8]) -> String {
         self.store.put_part(
             &blob_from_url(&part.url),
             part_number_from_url(&part.url),
             bytes,
         );
+        format!("memory-etag-{}", part.part_number)
     }
 }
 

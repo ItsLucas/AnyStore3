@@ -32,7 +32,6 @@ pub struct CosConfig {
     pub bucket: String,
     /// Service domain, e.g. `cos.ap-shanghai.myqcloud.com` or `light-cos.com`.
     pub endpoint: String,
-    pub region: Option<String>,
     pub secret_id: String,
     pub secret_key: String,
     /// Present only when temporary credentials are used.
@@ -501,7 +500,6 @@ mod tests {
         TencentCosBlobStore::new(CosConfig {
             bucket: "anystore-1250000000".into(),
             endpoint: "light-cos.com".into(),
-            region: None,
             secret_id: "AKIDEXAMPLE".into(),
             secret_key: "SECRETEXAMPLE".into(),
             session_token: None,
@@ -519,7 +517,6 @@ mod tests {
         let store = TencentCosBlobStore::new(CosConfig {
             bucket: "anystore-1250000000".into(),
             endpoint: "https://anystore-1250000000.light-cos.com/".into(),
-            region: None,
             secret_id: "id".into(),
             secret_key: "key".into(),
             session_token: None,

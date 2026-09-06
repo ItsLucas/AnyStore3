@@ -23,6 +23,8 @@ pub struct ChangePage {
     /// empty page.
     pub next_cursor: CursorId,
     pub has_more: bool,
+    /// Number of committed Changes after this page at read time.
+    pub lag: u64,
 }
 
 #[async_trait]

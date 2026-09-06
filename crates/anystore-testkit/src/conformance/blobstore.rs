@@ -11,13 +11,25 @@ use anystore_blobstore::{
 };
 use anystore_domain::upload::UploadMode;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Performs the client half of an upload for a given backend.
 #[async_trait]
 pub trait BlobUploader: Send + Sync {
     async fn put(&self, request: &SignedRequest, bytes: &[u8]);
-    async fn put_part(&self, part: &SignedPart, bytes: &[u8]);
+    async fn put_part(&self, part: &SignedPart, bytes: &[u8]) -> String;
+}
+
+fn unique_upload_id(prefix: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{timestamp}_{counter}")
 }
 
 fn prepare(upload_id: &str, mode: UploadMode, size: u64) -> PrepareUpload {
@@ -50,9 +62,10 @@ pub async fn single_upload_round_trips<S: BlobStore + ?Sized, U: BlobUploader>(
     uploader: &U,
 ) {
     let payload = b"hello world";
+    let upload_id = unique_upload_id("single");
     let prepared = store
         .prepare_upload(prepare(
-            "single_01",
+            &upload_id,
             UploadMode::Single,
             payload.len() as u64,
         ))
@@ -98,12 +111,13 @@ pub async fn multipart_upload_round_trips<S: BlobStore + ?Sized, U: BlobUploader
     store: &S,
     uploader: &U,
 ) {
-    let first = vec![b'A'; 1024];
+    let first = vec![b'A'; 5 * 1024 * 1024];
     let second = vec![b'B'; 512];
     let total = (first.len() + second.len()) as u64;
+    let upload_id = unique_upload_id("multi");
 
     let prepared = store
-        .prepare_upload(prepare("multi_01", UploadMode::Multipart, total))
+        .prepare_upload(prepare(&upload_id, UploadMode::Multipart, total))
         .await
         .unwrap();
     assert_eq!(prepared.mode, UploadMode::Multipart);
@@ -129,8 +143,8 @@ pub async fn multipart_upload_round_trips<S: BlobStore + ?Sized, U: BlobUploader
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0].method, "PUT");
 
-    uploader.put_part(&parts[0], &first).await;
-    uploader.put_part(&parts[1], &second).await;
+    let first_etag = uploader.put_part(&parts[0], &first).await;
+    let second_etag = uploader.put_part(&parts[1], &second).await;
 
     let completion = CompleteBlobUpload {
         blob_ref: prepared.blob_ref.clone(),
@@ -139,11 +153,11 @@ pub async fn multipart_upload_round_trips<S: BlobStore + ?Sized, U: BlobUploader
         parts: vec![
             CompletedPart {
                 part_number: 1,
-                etag: "etag-1".into(),
+                etag: first_etag,
             },
             CompletedPart {
                 part_number: 2,
-                etag: "etag-2".into(),
+                etag: second_etag,
             },
         ],
     };
@@ -166,8 +180,9 @@ pub async fn zero_byte_objects_are_supported<S: BlobStore + ?Sized, U: BlobUploa
     store: &S,
     uploader: &U,
 ) {
+    let upload_id = unique_upload_id("empty");
     let prepared = store
-        .prepare_upload(prepare("empty_01", UploadMode::Single, 0))
+        .prepare_upload(prepare(&upload_id, UploadMode::Single, 0))
         .await
         .unwrap();
     uploader.put(prepared.single.as_ref().unwrap(), b"").await;
@@ -190,8 +205,9 @@ pub async fn downloads_are_signed_with_the_current_name<S: BlobStore + ?Sized, U
     store: &S,
     uploader: &U,
 ) {
+    let upload_id = unique_upload_id("download");
     let prepared = store
-        .prepare_upload(prepare("download_01", UploadMode::Single, 2))
+        .prepare_upload(prepare(&upload_id, UploadMode::Single, 2))
         .await
         .unwrap();
     uploader.put(prepared.single.as_ref().unwrap(), b"hi").await;
@@ -218,8 +234,9 @@ pub async fn downloads_are_signed_with_the_current_name<S: BlobStore + ?Sized, U
 }
 
 pub async fn aborting_and_deleting_are_idempotent<S: BlobStore + ?Sized>(store: &S) {
+    let upload_id = unique_upload_id("abort");
     let prepared = store
-        .prepare_upload(prepare("abort_01", UploadMode::Multipart, 10))
+        .prepare_upload(prepare(&upload_id, UploadMode::Multipart, 10))
         .await
         .unwrap();
 

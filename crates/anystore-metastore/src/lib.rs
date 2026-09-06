@@ -25,8 +25,8 @@ pub use idempotency::{
 pub use maintenance::{BlobGcEntry, MaintenanceStore};
 pub use response::{ResponseRenderer, StoredResponse};
 pub use uploads::{
-    AbortUploadRecord, CreateUploadRecord, MarkUploadCompleting, UpdateUploadState,
-    UploadRepository,
+    AbortUploadRecord, CreateUploadRecord, CreateUploadResult, MarkUploadCompleting,
+    UpdateUploadState, UploadRepository,
 };
 
 use anystore_domain::error::DomainResult;

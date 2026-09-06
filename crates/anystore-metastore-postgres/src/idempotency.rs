@@ -32,7 +32,8 @@ ON CONFLICT (principal_id, operation, idempotency_key) DO NOTHING
 ";
 
 const SELECT_RECORD: &str = "
-SELECT request_hash, state, owner_token, lease_until, status_code, response_headers, response_body
+SELECT request_hash, state, owner_token, lease_until, status_code, response_headers, response_body,
+       created_at
 FROM idempotency_records
 WHERE principal_id = $1 AND operation = $2 AND idempotency_key = $3
 ";
@@ -171,7 +172,9 @@ impl IdempotencyStore for PostgresMetaStore {
                 .map_err(map_sqlx)?;
 
             if inserted.rows_affected() == 1 {
-                return Ok(IdempotencyDecision::Owner);
+                return Ok(IdempotencyDecision::Owner {
+                    resource_token: req.now.timestamp_micros().to_string(),
+                });
             }
 
             let Some(row) = read_record(self.pool(), ctx).await? else {
@@ -206,7 +209,10 @@ impl IdempotencyStore for PostgresMetaStore {
                     .await
                     .map_err(map_sqlx)?;
                 if stolen.rows_affected() == 1 {
-                    return Ok(IdempotencyDecision::Owner);
+                    let created_at: DateTime<Utc> = row.try_get("created_at").map_err(map_sqlx)?;
+                    return Ok(IdempotencyDecision::Owner {
+                        resource_token: created_at.timestamp_micros().to_string(),
+                    });
                 }
             }
 

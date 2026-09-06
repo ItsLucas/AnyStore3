@@ -17,3 +17,7 @@ quick-xml.workspace = true
 reqwest.workspace = true
 sha1.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+anystore-testkit.workspace = true
+tokio.workspace = true

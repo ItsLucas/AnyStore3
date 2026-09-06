@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::dto::change_json;
+use crate::metrics::Metrics;
 use crate::state::AppState;
 
 #[derive(Clone)]
@@ -42,6 +43,7 @@ impl ChangeService {
                 cursor_expires_at: now + config.changes_cursor_ttl,
             })
             .await?;
+        Metrics::set(&self.state.metrics.changes_lag, page.lag);
 
         Ok(json!({
             "items": page.items.iter().map(change_json).collect::<Vec<_>>(),

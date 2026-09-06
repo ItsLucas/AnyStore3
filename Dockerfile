@@ -15,6 +15,7 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock* ./
 COPY crates ./crates
 COPY migrations ./migrations
+COPY cloudbase ./cloudbase
 
 RUN cargo build --release --locked -p anystore-server \
     || cargo build --release -p anystore-server

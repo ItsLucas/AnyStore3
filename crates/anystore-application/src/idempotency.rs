@@ -27,6 +27,7 @@ pub fn idempotency_context(ctx: &RequestContext) -> Option<IdempotencyContext> {
         key: key.clone(),
         request_hash: ctx.request_hash.clone(),
         owner_token: owner_token(),
+        resource_token: ctx.now.timestamp_micros().to_string(),
     })
 }
 
@@ -43,6 +44,8 @@ pub fn derived_id(prefix: &str, ctx: &IdempotencyContext) -> String {
     hasher.update(ctx.key.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(ctx.request_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(ctx.resource_token.as_bytes());
     format!("{prefix}{}", hex::encode(&hasher.finalize()[..16]))
 }
 
@@ -55,7 +58,7 @@ pub enum Claim {
 }
 
 pub async fn claim(state: &AppState, ctx: &RequestContext) -> DomainResult<Claim> {
-    let Some(ictx) = idempotency_context(ctx) else {
+    let Some(mut ictx) = idempotency_context(ctx) else {
         return Ok(Claim::Proceed(None));
     };
 
@@ -70,7 +73,10 @@ pub async fn claim(state: &AppState, ctx: &RequestContext) -> DomainResult<Claim
         .await?;
 
     match decision {
-        IdempotencyDecision::Owner => Ok(Claim::Proceed(Some(ictx))),
+        IdempotencyDecision::Owner { resource_token } => {
+            ictx.resource_token = resource_token;
+            Ok(Claim::Proceed(Some(ictx)))
+        }
         IdempotencyDecision::Replay(response) => {
             Metrics::incr(&state.metrics.idempotency_hits_total);
             Ok(Claim::Replay(response))

@@ -21,6 +21,12 @@ pub struct CreateUploadRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct CreateUploadResult {
+    pub upload: UploadRecord,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct UpdateUploadState {
     pub id: UploadId,
     pub state: UploadState,
@@ -44,7 +50,10 @@ pub struct AbortUploadRecord {
 
 #[async_trait]
 pub trait UploadRepository: Send + Sync {
-    async fn create_upload_record(&self, cmd: CreateUploadRecord) -> DomainResult<UploadRecord>;
+    async fn create_upload_record(
+        &self,
+        cmd: CreateUploadRecord,
+    ) -> DomainResult<CreateUploadResult>;
     async fn get_upload(&self, id: &UploadId) -> DomainResult<Option<UploadRecord>>;
     async fn update_upload_state(&self, cmd: UpdateUploadState) -> DomainResult<()>;
     /// Aborts the session and enqueues its blob for garbage collection. Never

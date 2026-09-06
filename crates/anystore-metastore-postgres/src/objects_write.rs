@@ -8,6 +8,7 @@ use anystore_domain::change::{ChangeAction, ChangeRecord, PendingChange};
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::metadata::{apply_metadata_patch, metadata_equal};
 use anystore_domain::object::{ContentState, ObjectKind, Revision};
+use anystore_domain::upload::UploadState;
 use anystore_domain::{ChangeId, IdempotencyKey, ObjectId, RequestId};
 use anystore_metastore::ObjectMutationStore;
 use anystore_metastore::commands::{
@@ -75,8 +76,11 @@ SELECT * FROM UNNEST(
     $6::timestamptz[], $7::text[], $8::text[], $9::boolean[])
 ";
 
-/// Appends Change records, reserving the global sequence first so `change_id`
-/// stays monotonic in Change order.
+/// Appends Change records while holding a transaction-scoped ordering lock.
+///
+/// PostgreSQL sequences are allocated before commit. Without the lock, a later
+/// sequence can commit and advance a follower cursor before an earlier
+/// sequence becomes visible, permanently skipping the earlier Change.
 async fn append_changes(
     conn: &mut PgConnection,
     pending: &[PendingChange],
@@ -87,6 +91,11 @@ async fn append_changes(
     if pending.is_empty() {
         return Ok(Vec::new());
     }
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('anystore:changes:append')::bigint)")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
 
     let seqs: Vec<i64> =
         sqlx::query_scalar("SELECT nextval('changes_seq') FROM generate_series(1, $1)")
@@ -508,6 +517,38 @@ impl ObjectMutationStore for PostgresMetaStore {
     async fn commit_content(&self, cmd: CommitContent) -> DomainResult<StoredResponse> {
         let mut tx = self.pool().begin().await.map_err(map_sqlx)?;
 
+        let upload = sqlx::query(
+            "SELECT state, object_id, blob_backend, blob_ref
+             FROM uploads WHERE id = $1 FOR UPDATE",
+        )
+        .bind(cmd.upload_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(DomainError::UploadNotFound)?;
+
+        let upload_state_raw: String = upload.try_get("state").map_err(map_sqlx)?;
+        let upload_state = UploadState::parse(&upload_state_raw)
+            .ok_or_else(|| DomainError::internal("unknown persisted upload state"))?;
+        if !matches!(
+            upload_state,
+            UploadState::Ready | UploadState::Completing | UploadState::Completed
+        ) {
+            return Err(DomainError::UploadNotFound);
+        }
+
+        let upload_object_id: String = upload.try_get("object_id").map_err(map_sqlx)?;
+        let upload_backend: String = upload.try_get("blob_backend").map_err(map_sqlx)?;
+        let upload_blob_ref: String = upload.try_get("blob_ref").map_err(map_sqlx)?;
+        if upload_object_id != cmd.object_id.as_str()
+            || upload_backend != cmd.blob_backend
+            || upload_blob_ref != cmd.blob_ref
+        {
+            return Err(DomainError::internal(
+                "content commit does not match the upload record",
+            ));
+        }
+
         let locked = lock_object(&mut tx, &cmd.object_id)
             .await?
             .ok_or(DomainError::ObjectNotFound)?;
@@ -519,6 +560,24 @@ impl ObjectMutationStore for PostgresMetaStore {
             return Err(DomainError::NotAFile);
         }
         check_if_match(current.revision, cmd.if_match)?;
+
+        if upload_state == UploadState::Completed {
+            let view = load_view(&mut tx, &cmd.object_id)
+                .await?
+                .ok_or(DomainError::ObjectNotFound)?;
+            let response = finish(
+                &mut tx,
+                &cmd.ctx,
+                MutationOutcome {
+                    object: Some(view),
+                    changes: Vec::new(),
+                    no_op: true,
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(map_sqlx)?;
+            return Ok(response);
+        }
 
         let previous_state = current.content_state.unwrap_or(ContentState::None);
         let action = match previous_state {
@@ -561,13 +620,27 @@ impl ObjectMutationStore for PostgresMetaStore {
             enqueue_blob_gc(&mut tx, &backend, &blob_ref, cmd.gc_not_before).await?;
         }
 
-        sqlx::query(
+        let completed = sqlx::query(
             "UPDATE uploads
              SET state = 'completed', provider_completed = TRUE, completed_at = $2
-             WHERE id = $1",
+             WHERE id = $1 AND state IN ('ready', 'completing')",
         )
         .bind(cmd.upload_id.as_str())
         .bind(cmd.ctx.now)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        if completed.rows_affected() != 1 {
+            return Err(DomainError::UploadNotFound);
+        }
+
+        // A blob becoming live must not remain eligible for a stale GC entry.
+        sqlx::query(
+            "DELETE FROM blob_gc_queue
+             WHERE blob_backend = $1 AND blob_ref = $2",
+        )
+        .bind(&cmd.blob_backend)
+        .bind(&cmd.blob_ref)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;

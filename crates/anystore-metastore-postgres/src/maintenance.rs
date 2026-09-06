@@ -32,6 +32,13 @@ impl MaintenanceStore for PostgresMetaStore {
                  SELECT blob_backend, blob_ref
                  FROM blob_gc_queue
                  WHERE not_before <= $1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM objects
+                       WHERE deleted_at IS NULL
+                         AND content_state = 'ready'
+                         AND objects.blob_backend = blob_gc_queue.blob_backend
+                         AND objects.blob_ref = blob_gc_queue.blob_ref
+                   )
                  ORDER BY not_before
                  LIMIT $3
                  FOR UPDATE SKIP LOCKED
@@ -162,35 +169,33 @@ impl MaintenanceStore for PostgresMetaStore {
 
         // The watermark outlives the rows so that a cursor pointing into purged
         // history can still be rejected with `changes_cursor_expired`.
-        let purged: Option<i64> = sqlx::query_scalar(
+        let purged = sqlx::query(
             "WITH deleted AS (
                  DELETE FROM changes WHERE changed_at < $1 RETURNING seq
              )
-             SELECT MAX(seq) FROM deleted",
+             SELECT COUNT(*)::bigint AS count, MAX(seq) AS max_seq FROM deleted",
         )
         .bind(older_than)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx)?;
 
-        let count = match purged {
-            Some(max_seq) => {
-                let result = sqlx::query(
-                    "UPDATE changes_retention
-                     SET purged_through_seq = GREATEST(purged_through_seq, $1)
-                     WHERE singleton",
-                )
-                .bind(max_seq)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx)?;
-                result.rows_affected()
-            }
-            None => 0,
-        };
+        let count: i64 = purged.try_get("count").map_err(map_sqlx)?;
+        let max_seq: Option<i64> = purged.try_get("max_seq").map_err(map_sqlx)?;
+        if let Some(max_seq) = max_seq {
+            sqlx::query(
+                "UPDATE changes_retention
+                 SET purged_through_seq = GREATEST(purged_through_seq, $1)
+                 WHERE singleton",
+            )
+            .bind(max_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        }
 
         tx.commit().await.map_err(map_sqlx)?;
-        Ok(count)
+        Ok(count as u64)
     }
 
     async fn count_pending_gc(&self) -> DomainResult<u64> {

@@ -3,15 +3,16 @@
 use anystore_application::Metrics;
 use anystore_domain::error::DomainError;
 use anystore_domain::{PrincipalId, RequestId};
+use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::time::Instant;
 
-use crate::HttpState;
-use crate::error::error_response;
+use crate::error::{error_response, status_error_response};
 use crate::request::RequestMeta;
+use crate::{HttpState, MAX_BODY_BYTES};
 
 /// Static bearer token authentication.
 ///
@@ -80,6 +81,20 @@ pub async fn pipeline(State(state): State<HttpState>, mut req: Request, next: Ne
     let request_id = RequestId::generate();
     let path = req.uri().path().to_owned();
     let method = req.method().clone();
+    let idempotency_key_prefix = req
+        .headers()
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(8).collect::<String>())
+        .unwrap_or_default();
+    let object_id = path
+        .strip_prefix("/api/v1/objects/")
+        .and_then(|suffix| suffix.split('/').next())
+        .unwrap_or_default();
+    let upload_id = path
+        .strip_prefix("/api/v1/uploads/")
+        .and_then(|suffix| suffix.split('/').next())
+        .unwrap_or_default();
 
     let principal = if is_public(&path) {
         PrincipalId::local()
@@ -96,6 +111,24 @@ pub async fn pipeline(State(state): State<HttpState>, mut req: Request, next: Ne
     });
 
     let started = Instant::now();
+    let (parts, body) = req.into_parts();
+    let body = match to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            Metrics::incr(&state.app.metrics.http_requests_total);
+            Metrics::add(
+                &state.app.metrics.http_request_duration_ms_total,
+                started.elapsed().as_millis() as u64,
+            );
+            return status_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request",
+                "Request body exceeds the configured limit.",
+                &request_id,
+            );
+        }
+    };
+    let req = Request::from_parts(parts, Body::from(body));
     let mut response = next.run(req).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
@@ -113,8 +146,13 @@ pub async fn pipeline(State(state): State<HttpState>, mut req: Request, next: Ne
         request_id = %request_id,
         method = %method,
         path = %path,
+        operation = %format!("{method} {path}"),
+        object_id = %object_id,
+        upload_id = %upload_id,
+        idempotency_key_prefix = %idempotency_key_prefix,
         status = response.status().as_u16(),
         latency_ms = elapsed_ms,
+        result = if response.status().is_success() { "success" } else { "error" },
         "request completed"
     );
 

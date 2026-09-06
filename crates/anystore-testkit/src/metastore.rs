@@ -25,12 +25,12 @@ use anystore_metastore::idempotency::{
 use anystore_metastore::maintenance::{BlobGcEntry, MaintenanceStore};
 use anystore_metastore::response::StoredResponse;
 use anystore_metastore::uploads::{
-    AbortUploadRecord, CreateUploadRecord, UpdateUploadState, UploadRepository,
+    AbortUploadRecord, CreateUploadRecord, CreateUploadResult, UpdateUploadState, UploadRepository,
 };
 use anystore_metastore::{ContentPointer, ObjectMutationStore, ObjectRepository};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
@@ -50,6 +50,7 @@ impl StoredObject {
 #[derive(Clone, Debug)]
 struct IdempotencyRow {
     request_hash: String,
+    created_at: DateTime<Utc>,
     completed: bool,
     owner_token: Option<String>,
     lease_until: Option<DateTime<Utc>>,
@@ -753,6 +754,18 @@ impl ObjectMutationStore for InMemoryMetaStore {
     async fn commit_content(&self, cmd: CommitContent) -> DomainResult<StoredResponse> {
         let mut state = self.state.lock().unwrap();
 
+        let upload_state = state
+            .uploads
+            .get(cmd.upload_id.as_str())
+            .ok_or(DomainError::UploadNotFound)?
+            .state;
+        if !matches!(
+            upload_state,
+            UploadState::Ready | UploadState::Completing | UploadState::Completed
+        ) {
+            return Err(DomainError::UploadNotFound);
+        }
+
         let stored = state
             .objects
             .get(cmd.object_id.as_str())
@@ -763,6 +776,17 @@ impl ObjectMutationStore for InMemoryMetaStore {
             return Err(DomainError::NotAFile);
         }
         check_if_match(stored.object.revision, cmd.if_match)?;
+
+        if upload_state == UploadState::Completed {
+            let outcome = MutationOutcome {
+                object: Some(view_of(&state, &cmd.object_id)?),
+                changes: Vec::new(),
+                no_op: true,
+            };
+            let response = (cmd.ctx.render)(&outcome)?;
+            finalize_idempotency(&mut state, &cmd.ctx, &response)?;
+            return Ok(response);
+        }
 
         let action = match stored.object.content_state.unwrap_or(ContentState::None) {
             ContentState::None => ChangeAction::ContentReady,
@@ -796,6 +820,9 @@ impl ObjectMutationStore for InMemoryMetaStore {
             upload.provider_completed = true;
             upload.completed_at = Some(cmd.ctx.now);
         }
+        state
+            .gc
+            .retain(|row| row.blob_backend != cmd.blob_backend || row.blob_ref != cmd.blob_ref);
 
         let changes = append_changes(
             &mut state,
@@ -823,11 +850,17 @@ impl ObjectMutationStore for InMemoryMetaStore {
 
 #[async_trait]
 impl UploadRepository for InMemoryMetaStore {
-    async fn create_upload_record(&self, cmd: CreateUploadRecord) -> DomainResult<UploadRecord> {
+    async fn create_upload_record(
+        &self,
+        cmd: CreateUploadRecord,
+    ) -> DomainResult<CreateUploadResult> {
         let mut state = self.state.lock().unwrap();
         // Resuming a crashed attempt must not create a second session.
         if let Some(existing) = state.uploads.get(cmd.id.as_str()) {
-            return Ok(existing.clone());
+            return Ok(CreateUploadResult {
+                upload: existing.clone(),
+                created: false,
+            });
         }
 
         let record = UploadRecord {
@@ -848,7 +881,10 @@ impl UploadRepository for InMemoryMetaStore {
             aborted_at: None,
         };
         state.uploads.insert(cmd.id.to_string(), record.clone());
-        Ok(record)
+        Ok(CreateUploadResult {
+            upload: record,
+            created: true,
+        })
     }
 
     async fn get_upload(&self, id: &UploadId) -> DomainResult<Option<UploadRecord>> {
@@ -861,6 +897,18 @@ impl UploadRepository for InMemoryMetaStore {
             .uploads
             .get_mut(cmd.id.as_str())
             .ok_or(DomainError::UploadNotFound)?;
+        let transition_allowed = match cmd.state {
+            UploadState::Ready => {
+                matches!(upload.state, UploadState::Initiating | UploadState::Ready)
+            }
+            UploadState::Completing => {
+                matches!(upload.state, UploadState::Ready | UploadState::Completing)
+            }
+            _ => false,
+        };
+        if !transition_allowed {
+            return Err(DomainError::UploadNotFound);
+        }
         upload.state = cmd.state;
         if let Some(provider_upload_id) = cmd.provider_upload_id {
             upload.provider_upload_id = Some(provider_upload_id);
@@ -908,6 +956,7 @@ impl IdempotencyStore for InMemoryMetaStore {
                     key,
                     IdempotencyRow {
                         request_hash: ctx.request_hash.clone(),
+                        created_at: req.now,
                         completed: false,
                         owner_token: Some(ctx.owner_token.clone()),
                         lease_until: Some(req.lease_until),
@@ -915,7 +964,9 @@ impl IdempotencyStore for InMemoryMetaStore {
                         expires_at: req.expires_at,
                     },
                 );
-                Ok(IdempotencyDecision::Owner)
+                Ok(IdempotencyDecision::Owner {
+                    resource_token: req.now.timestamp_micros().to_string(),
+                })
             }
             Some(row) => {
                 if row.request_hash != ctx.request_hash {
@@ -932,7 +983,9 @@ impl IdempotencyStore for InMemoryMetaStore {
                 if row.lease_until.is_none_or(|until| until <= req.now) {
                     row.owner_token = Some(ctx.owner_token.clone());
                     row.lease_until = Some(req.lease_until);
-                    return Ok(IdempotencyDecision::Owner);
+                    return Ok(IdempotencyDecision::Owner {
+                        resource_token: row.created_at.timestamp_micros().to_string(),
+                    });
                 }
                 Err(DomainError::RateLimited)
             }
@@ -1033,6 +1086,7 @@ impl ChangeStore for InMemoryMetaStore {
                 items,
                 next_cursor: row.next_cursor_id.clone().expect("materialised cursor"),
                 has_more: row.has_more.unwrap_or(false),
+                lag: (state.changes.len() as i64 - end).max(0) as u64,
             });
         }
 
@@ -1083,6 +1137,7 @@ impl ChangeStore for InMemoryMetaStore {
             items,
             next_cursor,
             has_more,
+            lag: (snapshot_max_seq - page_end_seq).max(0) as u64,
         })
     }
 }
@@ -1099,12 +1154,20 @@ impl MaintenanceStore for InMemoryMetaStore {
         limit: u32,
     ) -> DomainResult<Vec<BlobGcEntry>> {
         let mut state = self.state.lock().unwrap();
+        let live_blobs: HashSet<(String, String)> = state
+            .objects
+            .values()
+            .filter(|object| object.is_live())
+            .filter_map(|object| Some((object.blob_backend.clone()?, object.blob_ref.clone()?)))
+            .collect();
         let mut claimed = Vec::new();
         for row in state.gc.iter_mut() {
             if claimed.len() >= limit as usize {
                 break;
             }
-            if row.not_before <= now {
+            if row.not_before <= now
+                && !live_blobs.contains(&(row.blob_backend.clone(), row.blob_ref.clone()))
+            {
                 row.not_before = now + Duration::minutes(5);
                 claimed.push(BlobGcEntry {
                     blob_backend: row.blob_backend.clone(),

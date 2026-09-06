@@ -9,6 +9,27 @@ use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 
+pub fn status_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: &RequestId,
+) -> Response {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": code,
+        "message": message,
+        "request_id": request_id.as_str(),
+    }))
+    .unwrap_or_else(|_| b"{\"error\":\"internal_error\"}".to_vec());
+
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", request_id.as_str())
+        .body(Body::from(body))
+        .expect("error response is always well formed")
+}
+
 pub fn error_response(error: &DomainError, request_id: &RequestId) -> Response {
     let status = StatusCode::from_u16(error.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = serde_json::to_vec(&error_json(error, request_id.as_str()))

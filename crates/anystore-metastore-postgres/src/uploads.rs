@@ -4,7 +4,9 @@ use anystore_domain::UploadId;
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::upload::UploadRecord;
 use anystore_metastore::UploadRepository;
-use anystore_metastore::uploads::{AbortUploadRecord, CreateUploadRecord, UpdateUploadState};
+use anystore_metastore::uploads::{
+    AbortUploadRecord, CreateUploadRecord, CreateUploadResult, UpdateUploadState,
+};
 use async_trait::async_trait;
 use sqlx::{AssertSqlSafe, Row};
 
@@ -18,31 +20,45 @@ const UPLOAD_COLUMNS: &str = "id, object_id, state, mode, blob_backend, blob_ref
 
 #[async_trait]
 impl UploadRepository for PostgresMetaStore {
-    async fn create_upload_record(&self, cmd: CreateUploadRecord) -> DomainResult<UploadRecord> {
-        let sql = format!(
+    async fn create_upload_record(
+        &self,
+        cmd: CreateUploadRecord,
+    ) -> DomainResult<CreateUploadResult> {
+        let mut tx = self.pool().begin().await.map_err(map_sqlx)?;
+        let inserted = sqlx::query(
             "INSERT INTO uploads (
                  id, object_id, state, mode, blob_backend, blob_ref,
                  expected_size, content_type, expected_sha256, created_at, expires_at)
              VALUES ($1, $2, 'initiating', $3, $4, $5, $6, $7, $8, $9, $10)
-             RETURNING {UPLOAD_COLUMNS}"
-        );
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(cmd.id.as_str())
+        .bind(cmd.object_id.as_str())
+        .bind(cmd.mode.as_str())
+        .bind(&cmd.blob_backend)
+        .bind(&cmd.blob_ref)
+        .bind(cmd.expected_size as i64)
+        .bind(&cmd.content_type)
+        .bind(cmd.expected_sha256.as_deref())
+        .bind(cmd.created_at)
+        .bind(cmd.expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
 
+        let sql = format!("SELECT {UPLOAD_COLUMNS} FROM uploads WHERE id = $1");
         let row = sqlx::query(AssertSqlSafe(sql))
             .bind(cmd.id.as_str())
-            .bind(cmd.object_id.as_str())
-            .bind(cmd.mode.as_str())
-            .bind(&cmd.blob_backend)
-            .bind(&cmd.blob_ref)
-            .bind(cmd.expected_size as i64)
-            .bind(&cmd.content_type)
-            .bind(cmd.expected_sha256.as_deref())
-            .bind(cmd.created_at)
-            .bind(cmd.expires_at)
-            .fetch_one(self.pool())
+            .fetch_one(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+        let upload = decode_upload(&row)?;
+        tx.commit().await.map_err(map_sqlx)?;
 
-        decode_upload(&row)
+        Ok(CreateUploadResult {
+            upload,
+            created: inserted.rows_affected() == 1,
+        })
     }
 
     async fn get_upload(&self, id: &UploadId) -> DomainResult<Option<UploadRecord>> {
@@ -62,7 +78,11 @@ impl UploadRepository for PostgresMetaStore {
              SET state = $2,
                  provider_upload_id = COALESCE($3, provider_upload_id),
                  provider_completed = COALESCE($4, provider_completed)
-             WHERE id = $1",
+             WHERE id = $1
+               AND (
+                    ($2 = 'ready' AND state IN ('initiating', 'ready'))
+                 OR ($2 = 'completing' AND state IN ('ready', 'completing'))
+               )",
         )
         .bind(cmd.id.as_str())
         .bind(cmd.state.as_str())

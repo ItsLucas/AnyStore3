@@ -20,6 +20,7 @@ from typing import Any
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8088/api/v1"
 RUN = uuid.uuid4().hex[:8]
+AUTH_TOKEN = os.environ.get("ANYSTORE_TEST_AUTH_TOKEN", "").strip()
 
 # Must exceed the deployment's multipart threshold. Defaults to just over the
 # documented 64 MiB default; override when the target uses a smaller threshold.
@@ -59,6 +60,8 @@ def call(
     url = path if absolute else f"{BASE}{path}"
     data = raw_body
     send_headers = dict(headers or {})
+    if AUTH_TOKEN and not absolute:
+        send_headers.setdefault("Authorization", f"Bearer {AUTH_TOKEN}")
     if body is not None:
         data = json.dumps(body).encode()
         send_headers.setdefault("Content-Type", "application/json")
@@ -327,6 +330,19 @@ check("T14 metadata query returns the file once", len(matches) == 1, r.text)
 
 CONTENT = b"hello world"
 
+r = call(
+    "POST",
+    "/uploads",
+    {
+        "object_id": file_id,
+        "size": len(CONTENT),
+        "sha256": "not-a-sha256-digest",
+    },
+    {"Idempotency-Key": key("invalid-sha256")},
+)
+check("upload rejects malformed sha256", r.status == 400, f"{r.status} {r.text}")
+check("malformed sha256 uses invalid_request", r.json()["error"] == "invalid_request", r.text)
+
 before_revision = call("GET", f"/objects/{file_id}").json()["revision"]
 t15_body = {
     "object_id": file_id,
@@ -353,6 +369,23 @@ t15_text = r.text
 r = call("POST", "/uploads", t15_body, {"Idempotency-Key": key("upload-create")})
 check("T16 session retry status", r.status in (200, 201))
 check("T16 session retry is byte-identical", r.text == t15_text, r.text)
+
+r = call(
+    "POST",
+    "/objects",
+    {"kind": "file", "name": f"replay-upload-{RUN}.bin", "parent_id": folder2_id},
+    {"Idempotency-Key": key("create-upload-replay-target")},
+)
+upload_replay_target = r.json()["id"]
+upload_replay_body = {"object_id": upload_replay_target, "size": 1}
+upload_replay_headers = {"Idempotency-Key": key("upload-replay-after-delete")}
+r = call("POST", "/uploads", upload_replay_body, upload_replay_headers)
+upload_replay_text = r.text
+check("upload replay setup succeeds", r.status == 201, f"{r.status} {r.text}")
+call("DELETE", f"/objects/{upload_replay_target}")
+r = call("POST", "/uploads", upload_replay_body, upload_replay_headers)
+check("upload replay precedes target validation", r.status == 201, f"{r.status} {r.text}")
+check("upload replay after target deletion is byte-identical", r.text == upload_replay_text, r.text)
 
 put = call("PUT", session["upload"]["url"], raw_body=CONTENT, absolute=True)
 check("upload bytes to the signed URL", put.status == 200, str(put.status))
@@ -388,6 +421,12 @@ check(
     "T19 replay emitted no duplicate change",
     len(changes_for(file_id)) == before + 1,
 )
+
+before_repeat = len(changes_for(file_id))
+r = call("POST", f"/uploads/{upload_id}/complete", {})
+check("completed upload converges without an idempotency key", r.status == 200, f"{r.status} {r.text}")
+check("repeated completion keeps the revision", r.json()["revision"] == file_revision, r.text)
+check("repeated completion emits no Change", len(changes_for(file_id)) == before_repeat)
 
 # T20: stale revision during replacement.
 REPLACEMENT = b"replaced!!!"
@@ -525,6 +564,43 @@ r = call(
     {"Idempotency-Key": key("upload-parts")},
 )
 check("T17 part allocation replay is byte-identical", r.text == parts_text, r.text)
+
+r = call(
+    "POST",
+    "/objects",
+    {"kind": "file", "name": f"parts-replay-{RUN}.bin", "parent_id": folder2_id},
+    {"Idempotency-Key": key("create-parts-replay-target")},
+)
+parts_replay_target = r.json()["id"]
+r = call(
+    "POST",
+    "/uploads",
+    {"object_id": parts_replay_target, "size": MULTIPART_SIZE},
+    {"Idempotency-Key": key("create-parts-replay-upload")},
+)
+parts_replay_upload = r.json()["id"]
+parts_replay_headers = {"Idempotency-Key": key("parts-replay-after-abort")}
+r = call(
+    "POST",
+    f"/uploads/{parts_replay_upload}/parts",
+    {"part_numbers": [1, 2]},
+    parts_replay_headers,
+)
+parts_replay_text = r.text
+check("parts replay setup succeeds", r.status == 200, f"{r.status} {r.text}")
+call(
+    "DELETE",
+    f"/uploads/{parts_replay_upload}",
+    headers={"Idempotency-Key": key("abort-parts-replay-upload")},
+)
+r = call(
+    "POST",
+    f"/uploads/{parts_replay_upload}/parts",
+    {"part_numbers": [1, 2]},
+    parts_replay_headers,
+)
+check("parts replay precedes upload validation", r.status == 200, f"{r.status} {r.text}")
+check("parts replay after abort is byte-identical", r.text == parts_replay_text, r.text)
 
 for part, payload in zip(sorted(parts, key=lambda p: p["part_number"]), [part_a, part_b]):
     call("PUT", part["url"], raw_body=payload, absolute=True)
@@ -819,6 +895,29 @@ check(
     == "content_not_ready",
 )
 check("root resolves to /", call("GET", "/resolve?path=/").json()["id"] == "root")
+
+# ---------------------------------------------------------------------------
+# Framework-level error envelope
+# ---------------------------------------------------------------------------
+
+r = call("GET", "/route-that-does-not-exist")
+check("unknown route returns 404", r.status == 404, f"{r.status} {r.text}")
+check("unknown route uses the JSON error envelope", set(r.json()) >= {"error", "message", "request_id"}, r.text)
+check("unknown route carries x-request-id", bool(r.header("x-request-id")), str(r.headers))
+
+r = call("PUT", "/objects", {})
+check("unsupported method returns 405", r.status == 405, f"{r.status} {r.text}")
+check("unsupported method uses the JSON error envelope", set(r.json()) >= {"error", "message", "request_id"}, r.text)
+
+r = call(
+    "POST",
+    "/query",
+    raw_body=b"x" * (1024 * 1024 + 1),
+    headers={"Content-Type": "application/json"},
+)
+check("oversized request returns 413", r.status == 413, f"{r.status} {r.text}")
+check("oversized request uses the JSON error envelope", set(r.json()) >= {"error", "message", "request_id"}, r.text)
+check("oversized request carries x-request-id", bool(r.header("x-request-id")), str(r.headers))
 
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,9 @@ pub struct IdempotencyContext {
     pub request_hash: String,
     /// Identifies this attempt so a crashed owner's lease can be taken over.
     pub owner_token: String,
+    /// Stable for the lifetime of one retained idempotency record. Resource ids
+    /// derived from it survive lease takeover but change after retention purge.
+    pub resource_token: String,
 }
 
 #[derive(Clone, Debug)]
@@ -33,7 +36,7 @@ pub struct IdempotencyAcquire {
 #[derive(Clone, Debug)]
 pub enum IdempotencyDecision {
     /// The caller owns the key and must execute the operation.
-    Owner,
+    Owner { resource_token: String },
     /// The operation already completed; return this response verbatim.
     Replay(StoredResponse),
     /// The key was used with a different request.
