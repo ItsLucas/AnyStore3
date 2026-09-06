@@ -12,14 +12,22 @@ contains no business-specific entities or fields.
 
 ## Connecting to your deployment
 
-Configure your own API origin and credentials locally. Deployment identifiers and instance settings are not part of this repository.
+Deploy AnyStore in your own environment and configure its API origin and
+credentials locally. Examples below use placeholder domains; environment IDs,
+bucket names and instance settings are deployment-specific and do not belong
+in this README.
+
+The public API requires `Authorization: Bearer <ANYSTORE_AUTH_TOKEN>`.
+Deployment credentials are kept in the ignored, mode-`0600` `secrets.env`
+file and are injected into CloudBase Run; they are never packaged into the
+container source bundle.
 
 ### Testing the deployed service
 
 Run the repeatable remote acceptance checks from the repository root:
 
 ```bash
-tests/run_remote.sh
+ANYSTORE_TEST_BASE_URL=https://your-api.example.com/api/v1 tests/run_remote.sh
 ```
 
 The default run performs a self-cleaning end-to-end smoke test against
@@ -31,7 +39,7 @@ and is not placed on the Newman command line.
 The exhaustive contract suite is optional:
 
 ```bash
-tests/run_remote.sh --full
+ANYSTORE_TEST_BASE_URL=https://your-api.example.com/api/v1 tests/run_remote.sh --full
 ```
 
 `--full` additionally runs all contract checks and uploads a multipart object
@@ -275,9 +283,9 @@ Migrations live in two places, deliberately:
 | `migrations/` | sqlx, for the `postgres` backend | Tables, indexes, sequences |
 | `cloudbase/migrations/` | CloudBase tooling, out of band | The PostgREST RPC surface |
 
-| Version | Name | Status |
+| Version | Name | Purpose |
 |---|---|---|
-| `20260901171500` | `initial_anystore_schema` | Applied |
+| `20260901171500` | `initial_anystore_schema` | Create the initial schema |
 | `20260901213000` | `anystore_postgrest_rpc` | Apply before deploying `cloudbase_postgrest` |
 | `20260902002000` | `lock_down_anystore_rpc` | Restricts tables and RPC functions to the server-side `service_role` |
 
