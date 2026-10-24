@@ -4,10 +4,11 @@
 //! the application.
 
 use anystore_application::content::ContentService;
+use anystore_domain::error::DomainError;
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use std::sync::Arc;
 
@@ -51,16 +52,25 @@ pub async fn head_content(
             .header(header::CONTENT_LENGTH, head.size.to_string())
             .header("x-request-id", meta.request_id.as_str());
 
-        if let Some(content_type) = head.content_type {
-            builder = builder.header(header::CONTENT_TYPE, content_type);
-        }
-        if let Some(sha256) = head.sha256 {
-            builder = builder.header("x-anystore-sha256", sha256);
+        // Stored values are validated on write, but rows written before that
+        // validation existed must not be able to turn a HEAD into a panic.
+        for (name, value) in [
+            (header::CONTENT_TYPE.as_str(), head.content_type),
+            ("x-anystore-sha256", head.sha256),
+        ] {
+            let Some(value) = value else { continue };
+            match HeaderValue::from_str(&value) {
+                Ok(value) => builder = builder.header(name, value),
+                Err(_) => tracing::warn!(
+                    request_id = %meta.request_id,
+                    "omitting stored {name} that is not a valid header value"
+                ),
+            }
         }
 
-        Ok(builder
+        builder
             .body(Body::empty())
-            .expect("head response is always well formed"))
+            .map_err(|e| DomainError::internal(format!("head response: {e}")))
     })
     .await
 }

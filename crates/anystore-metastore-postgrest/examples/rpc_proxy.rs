@@ -22,8 +22,14 @@ use axum::routing::post;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
 
-const RPC_MIGRATION: &str =
-    include_str!("../../../cloudbase/migrations/20260901213000_anystore_postgrest_rpc.sql");
+/// The RPC surface migrations, in version order. `include_str!` makes a rename
+/// a compile error.
+const RPC_MIGRATIONS: [&str; 2] = [
+    include_str!("../../../cloudbase/migrations/20260901213000_anystore_postgrest_rpc.sql"),
+    include_str!(
+        "../../../cloudbase/migrations/20261024120000_bound_tree_walks_and_lock_waits.sql"
+    ),
+];
 
 #[derive(Clone)]
 struct ProxyState {
@@ -48,10 +54,12 @@ async fn main() {
 
     if std::env::args().any(|arg| arg == "--migrate") {
         store.migrate().await.expect("base migrations");
-        sqlx::raw_sql(RPC_MIGRATION)
-            .execute(store.pool())
-            .await
-            .expect("rpc migration");
+        for migration in RPC_MIGRATIONS {
+            sqlx::raw_sql(migration)
+                .execute(store.pool())
+                .await
+                .expect("rpc migration");
+        }
         eprintln!("applied the base schema and the anystore RPC surface");
     }
 

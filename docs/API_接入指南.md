@@ -134,6 +134,7 @@ order-service-report-20260902-create-v1
 2. 重试不会重复创建对象、增加 revision 或产生重复 Change。
 3. 相同 Key 用于不同请求时返回 `409 idempotency_key_reused`。
 4. 已完成记录至少保留 24 小时。
+5. Key 必须是 1–255 个可见 ASCII 字符（不含空格）；格式不合法时返回 `400 invalid_request`，不会被当作未传。`If-Match` 同理。
 
 网络超时后，接入方应使用**相同 Key 和相同请求内容**重试，不要生成新 Key。
 
@@ -220,7 +221,7 @@ HTTP/1.1 412 Precondition Failed
 | `name` | string | 当前父目录内的名称 |
 | `parent_id` | string/null | 父对象 ID；根对象为 `null` |
 | `path` | string | 根据目录树实时推导的完整路径 |
-| `content_type` | string/null | 文件 MIME 类型 |
+| `content_type` | string/null | 文件 MIME 类型，形如 `type/subtype`，可带参数；不超过 255 字节，只允许可见 ASCII、空格和制表符 |
 | `size` | integer/null | 已完成内容的字节数 |
 | `sha256` | string/null | 64 位十六进制 SHA-256 |
 | `content_state` | string | 文件为 `none` 或 `ready` |
@@ -945,7 +946,7 @@ Change 至少保留 30 天。游标超出保留窗口时返回：
 | 412 | `revision_conflict` | `If-Match` 与当前 revision 不同 |
 | 413 | `invalid_request` | 请求体超过 1 MiB |
 | 422 | `checksum_mismatch` | 上传大小或 SHA-256 不匹配 |
-| 429 | `rate_limited` | 请求或幂等争用被限流 |
+| 429 | `rate_limited` | 请求或幂等争用被限流，或写入在数据库锁上等待超时 |
 | 500 | `internal_error` | 服务内部错误 |
 | 502 | `storage_error` | COS 等存储后端错误 |
 

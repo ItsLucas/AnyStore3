@@ -1,0 +1,16 @@
+# The image needs only the workspace sources; keep build output, credentials
+# and local configuration out of the build context and out of any upload.
+target
+.git
+.github
+.anystore-blobs
+docs
+tests
+**/__pycache__
+*.env
+*.env.*
+secrets
+secrets.*
+cloudbaserc.json
+*.pem
+*.key

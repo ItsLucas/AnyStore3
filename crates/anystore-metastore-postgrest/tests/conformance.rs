@@ -9,10 +9,13 @@
 
 use anystore_application::dto;
 use anystore_domain::ObjectId;
+use anystore_domain::error::DomainError;
 use anystore_domain::object::ObjectKind;
 use anystore_domain::{IdempotencyKey, PrincipalId, RequestId};
 use anystore_metastore::ObjectMutationStore;
-use anystore_metastore::commands::{CreateObjectCommit, MutationContext, MutationOutcome};
+use anystore_metastore::commands::{
+    CreateObjectCommit, MutationContext, MutationOutcome, PatchObjectCommit,
+};
 use anystore_metastore::idempotency::{
     IdempotencyAcquire, IdempotencyContext, IdempotencyDecision,
 };
@@ -33,9 +36,14 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
 use std::sync::Arc;
 
-/// The migration under review. `include_str!` makes a rename a compile error.
-const RPC_MIGRATION: &str =
-    include_str!("../../../cloudbase/migrations/20260901213000_anystore_postgrest_rpc.sql");
+/// The RPC surface migrations, in version order. `include_str!` makes a rename
+/// a compile error.
+const RPC_MIGRATIONS: [&str; 2] = [
+    include_str!("../../../cloudbase/migrations/20260901213000_anystore_postgrest_rpc.sql"),
+    include_str!(
+        "../../../cloudbase/migrations/20261024120000_bound_tree_walks_and_lock_waits.sql"
+    ),
+];
 
 const TEST_API_KEY: &str = "conformance-api-key";
 
@@ -106,14 +114,22 @@ struct ProxyFactory {
 
 impl ProxyFactory {
     async fn start(url: &str) -> Self {
-        let migrator = PostgresMetaStore::connect(url, PoolConfig::default())
+        // A session lock timeout far above the RPC function's own, so tests
+        // observe the timeout the migration sets rather than the proxy's.
+        let pool_config = PoolConfig {
+            lock_timeout: std::time::Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let migrator = PostgresMetaStore::connect(url, pool_config)
             .await
             .expect("connect");
         migrator.migrate().await.expect("base migrations");
-        sqlx::raw_sql(RPC_MIGRATION)
-            .execute(migrator.pool())
-            .await
-            .expect("rpc migration");
+        for migration in RPC_MIGRATIONS {
+            sqlx::raw_sql(migration)
+                .execute(migrator.pool())
+                .await
+                .expect("rpc migration");
+        }
 
         let pool = migrator.pool().clone();
         let router = Router::new()
@@ -385,4 +401,164 @@ async fn the_blob_gc_queue_leases_backs_off_and_drains() {
 
     store.finish_gc(&retried[0]).await.expect("finish");
     assert_eq!(store.count_pending_gc().await.expect("count"), 0);
+}
+
+fn plain_context() -> MutationContext {
+    let now = Utc::now();
+    MutationContext {
+        now,
+        request_id: RequestId::generate(),
+        idempotency_key: None,
+        idempotency: None,
+        idempotency_expires_at: now + Duration::hours(24),
+        render: Arc::new(|_: &MutationOutcome| panic!("the adapter must not render in process")),
+    }
+}
+
+fn create_folder_command(name: &str, parent: &ObjectId) -> CreateObjectCommit {
+    CreateObjectCommit {
+        id: ObjectId::generate(),
+        kind: ObjectKind::Folder,
+        name: name.into(),
+        parent_id: parent.clone(),
+        content_type: None,
+        metadata: json!({}),
+        ctx: plain_context(),
+    }
+}
+
+async fn create_folder(store: &PostgrestMetaStore, name: &str, parent: &ObjectId) -> ObjectId {
+    let command = create_folder_command(name, parent);
+    let id = command.id.clone();
+    store.create_object(command).await.expect("create folder");
+    id
+}
+
+async fn hold_change_order_lock(pool: &sqlx::PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut stalled = pool.begin().await.expect("begin stalled tx");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('anystore:changes:append')::bigint)")
+        .execute(&mut *stalled)
+        .await
+        .expect("take ordering lock");
+    stalled
+}
+
+/// Mirrors the sqlx adapter's test: two moves that together would form a cycle
+/// are both held at the Change-order lock after their unlocked ancestor walks.
+#[tokio::test]
+async fn concurrent_folder_moves_cannot_create_a_cycle() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: ANYSTORE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let _guard = TEST_LOCK.lock().await;
+    let _database = lock_database(&url).await;
+
+    let factory = ProxyFactory::start(&url).await;
+    let store = factory.create().await;
+    let root = ObjectId::root();
+    let a = create_folder(&store, "a", &root).await;
+    let d = create_folder(&store, "d", &a).await;
+    let b = create_folder(&store, "b", &root).await;
+    let c = create_folder(&store, "c", &b).await;
+
+    let stalled = hold_change_order_lock(&factory.pool).await;
+    let spawn_move = |id: &ObjectId, destination: &ObjectId| {
+        let store = Arc::clone(&store);
+        let command = PatchObjectCommit {
+            id: id.clone(),
+            if_match: None,
+            new_name: None,
+            new_parent_id: Some(destination.clone()),
+            metadata_patch: None,
+            ctx: plain_context(),
+        };
+        tokio::spawn(async move { store.patch_object(command).await })
+    };
+    let first = spawn_move(&a, &c);
+    let second = spawn_move(&b, &d);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!first.is_finished() && !second.is_finished());
+    stalled.commit().await.expect("release ordering lock");
+
+    let results = [
+        first.await.expect("first move task"),
+        second.await.expect("second move task"),
+    ];
+    let succeeded = results.iter().filter(|r| r.is_ok()).count();
+    let rejected = results
+        .iter()
+        .filter(|r| matches!(r, Err(DomainError::InvalidMove(_))))
+        .count();
+    assert_eq!(
+        (succeeded, rejected),
+        (1, 1),
+        "exactly one move may win: {results:?}"
+    );
+
+    let a_path = store.get_object(&a).await.expect("get a").expect("a").path;
+    let b_path = store.get_object(&b).await.expect("get b").expect("b").path;
+    assert!(
+        (a_path == "/b/c/a" && b_path == "/b") || (a_path == "/a" && b_path == "/a/d/b"),
+        "tree must stay rooted: a={a_path} b={b_path}"
+    );
+}
+
+/// A writer stuck behind the Change-order lock gives up before the gateway's
+/// HTTP timeout and reports a retryable error instead of an opaque failure.
+#[tokio::test]
+async fn a_blocked_writer_gives_up_with_a_retryable_error() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: ANYSTORE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let _guard = TEST_LOCK.lock().await;
+    let _database = lock_database(&url).await;
+
+    let factory = ProxyFactory::start(&url).await;
+    let store = factory.create().await;
+
+    let stalled = hold_change_order_lock(&factory.pool).await;
+    let command = create_folder_command("blocked", &ObjectId::root());
+    let id = command.id.clone();
+    let error = store
+        .create_object(command)
+        .await
+        .expect_err("the write must not wait indefinitely");
+    assert!(matches!(error, DomainError::RateLimited), "{error:?}");
+    stalled.rollback().await.expect("release ordering lock");
+
+    assert!(
+        store.get_object(&id).await.expect("get").is_none(),
+        "a write that gave up must leave nothing behind"
+    );
+}
+
+/// Defence in depth: should a parent cycle ever be persisted, reads that walk
+/// the tree must still terminate.
+#[tokio::test]
+async fn tree_walks_terminate_on_a_parent_cycle() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: ANYSTORE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let _guard = TEST_LOCK.lock().await;
+    let _database = lock_database(&url).await;
+
+    let factory = ProxyFactory::start(&url).await;
+    let store = factory.create().await;
+    let a = create_folder(&store, "a", &ObjectId::root()).await;
+    let b = create_folder(&store, "b", &a).await;
+    sqlx::query("UPDATE objects SET parent_id = $1 WHERE id = $2")
+        .bind(b.as_str())
+        .bind(a.as_str())
+        .execute(&factory.pool)
+        .await
+        .expect("force a cycle");
+
+    let read = tokio::time::timeout(std::time::Duration::from_secs(5), store.get_object(&a))
+        .await
+        .expect("path rendering must terminate");
+    assert!(read.expect("get_object").is_some());
 }

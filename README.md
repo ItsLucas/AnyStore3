@@ -155,6 +155,8 @@ docker compose up -d postgres
 
 export ANYSTORE_DATABASE_URL=postgres://postgres:anystore@127.0.0.1:54329/anystore
 export ANYSTORE_BLOB_BACKEND=local_fs
+export ANYSTORE_LOCAL_BLOB_SECRET=local-development-secret
+export ANYSTORE_ALLOW_ANONYMOUS=true
 export ANYSTORE_PORT=8088
 
 cargo run -p anystore-server
@@ -210,6 +212,8 @@ ANYSTORE_DATABASE_BACKEND=cloudbase_postgrest \
 ANYSTORE_CLOUDBASE_PG_BASE_URL=http://127.0.0.1:8099 \
 ANYSTORE_CLOUDBASE_PG_API_KEY=local-proxy-key \
 ANYSTORE_BLOB_BACKEND=local_fs \
+ANYSTORE_LOCAL_BLOB_SECRET=local-development-secret \
+ANYSTORE_ALLOW_ANONYMOUS=true \
   cargo run -p anystore-server
 ```
 
@@ -239,14 +243,15 @@ the upload, replacement and recursive-delete flows the collection omits.
 | `ANYSTORE_CLOUDBASE_PG_RPC_PATH` | `/v1/rdb/rest/rpc` | PostgREST RPC prefix |
 | `ANYSTORE_CLOUDBASE_PG_FUNCTION` | `anystore_rpc` | Dispatcher function name |
 | `ANYSTORE_CLOUDBASE_PG_TIMEOUT_SECONDS` | `20` | Per-request gateway timeout |
-| `ANYSTORE_BLOB_BACKEND` | `local_fs` | `tencent_cos` or `local_fs` |
+| `ANYSTORE_BLOB_BACKEND` | *(required)* | `tencent_cos` or `local_fs`; there is no default |
 | `ANYSTORE_COS_BUCKET` | | Bucket including the APPID suffix |
 | `ANYSTORE_COS_ENDPOINT` | | e.g. `cos.ap-shanghai.myqcloud.com` or `light-cos.com` |
 | `ANYSTORE_COS_SECRET_ID` / `_SECRET_KEY` | | Credentials; never logged or returned |
 | `ANYSTORE_COS_SESSION_TOKEN` | | Set when using temporary credentials |
 | `ANYSTORE_PORT` / `PORT` | `8088` | Listen port |
 | `ANYSTORE_PUBLIC_BASE_URL` | `http://127.0.0.1:$PORT` | Base for development signed URLs |
-| `ANYSTORE_AUTH_TOKEN` | *(unset)* | When set, requires `Authorization: Bearer` |
+| `ANYSTORE_AUTH_TOKEN` | *(required)* | Requires `Authorization: Bearer`; startup fails without it unless anonymous access is allowed |
+| `ANYSTORE_ALLOW_ANONYMOUS` | `false` | `true` runs without authentication; local development only |
 | `ANYSTORE_IDEMPOTENCY_RETENTION_HOURS` | `24` | Contract minimum is 24 |
 | `ANYSTORE_CHANGES_RETENTION_DAYS` | `30` | Contract minimum is 30 |
 | `ANYSTORE_CHANGES_CURSOR_TTL_DAYS` | `30` | Lower it to exercise T37 |
@@ -255,12 +260,34 @@ the upload, replacement and recursive-delete flows the collection omits.
 | `ANYSTORE_DOWNLOAD_URL_EXPIRY_SECONDS` | `600` | Signed download URL lifetime |
 | `ANYSTORE_MULTIPART_THRESHOLD_BYTES` | `67108864` | Above this, uploads are multipart |
 | `ANYSTORE_PART_SIZE_BYTES` | `16777216` | Multipart part size |
-| `ANYSTORE_MAINTENANCE_INTERVAL_SECONDS` | `300` | `0` disables the loop |
+| `ANYSTORE_MAINTENANCE_DAILY_AT` | `03:00` | Daily in-process maintenance time (`HH:MM`), or `off` |
+| `ANYSTORE_MAINTENANCE_UTC_OFFSET` | `+08:00` | UTC offset of `ANYSTORE_MAINTENANCE_DAILY_AT` |
+| `ANYSTORE_MAINTENANCE_BUDGET_SECONDS` | `20` | Time budget of one pass; keep it below the platform request timeout |
 | `ANYSTORE_LOG` | `info` | `tracing` filter |
 | `ANYSTORE_LOCAL_BLOB_ROOT` | `./.anystore-blobs` | Development backend only |
-| `ANYSTORE_LOCAL_BLOB_SECRET` | *(development default)* | Signs development URLs |
+| `ANYSTORE_LOCAL_BLOB_SECRET` | *(required for `local_fs`)* | Signs development URLs; at least 16 bytes |
 
 ## Deployment
+
+### Maintenance
+
+One maintenance pass expires stale upload sessions, deletes unreferenced blobs
+and purges idempotency records, Changes cursors and old Changes. Expiry and
+blob collection repeat in batches until their backlog is empty or the time
+budget runs out; the next pass resumes whatever is left.
+
+A pass runs daily at `ANYSTORE_MAINTENANCE_DAILY_AT` in every live process.
+A deployment that scales to zero has no live process at that time, so it also
+needs an external trigger: `POST /internal/maintenance` runs one pass and
+returns its report. It is not part of the public API and requires the same
+bearer token. `cloudbase/functions/anystore-maintenance` is a timer-triggered
+cloud function that calls it daily at 03:00, retries while a cold start answers
+502/503/504, and calls again while a pass reports `"drained": false`;
+`cloudbaserc.example.json` shows its configuration. A pass that finds another one running in the same process
+returns `202 {"status": "already_running"}`, and passes in different processes
+only duplicate work, because every claim uses `SKIP LOCKED`.
+
+The server handles SIGTERM by finishing in-flight requests before exiting.
 
 ```bash
 docker build -t anystore:v1 .
@@ -270,9 +297,11 @@ The image runs as a non-root user and reads `PORT`, which CloudBase Run injects.
 The service is stateless: local disk is used only by the development blob
 backend, which must not be used in production.
 
-Authentication is deployment-specific. With `ANYSTORE_AUTH_TOKEN` unset, every
-request runs as principal `local`; the token maps to the same principal, so
-idempotency scope is unaffected by enabling it.
+Authentication is deployment-specific. Startup fails when `ANYSTORE_AUTH_TOKEN`
+is unset unless `ANYSTORE_ALLOW_ANONYMOUS=true`, in which case every request
+runs as principal `local`; the token maps to the same principal, so idempotency
+scope is unaffected by enabling it. `ANYSTORE_BLOB_BACKEND` likewise has no
+default, so a missing variable cannot silently select container-local storage.
 
 ### CloudBase PostgreSQL
 
@@ -292,6 +321,21 @@ Migrations live in two places, deliberately:
 | `20260901171500` | `initial_anystore_schema` | Create the initial schema |
 | `20260901213000` | `anystore_postgrest_rpc` | Apply before deploying `cloudbase_postgrest` |
 | `20260902002000` | `lock_down_anystore_rpc` | Restricts tables and RPC functions to the server-side `service_role` |
+| `20261024120000` | `bound_tree_walks_and_lock_waits` | Cycle-safe tree walks, locked re-check of folder moves, bounded lock waits |
+
+Apply pending versions with `tcb db pg migration up`; `tcb db pg migration list`
+compares local and remote. The tooling records applied versions, so a change to
+the RPC surface ships as a new version that replaces the affected functions;
+an applied file is never edited.
+
+Writes serialise on one Change-order lock, so lock waits are bounded: the
+sqlx backend sets `statement_timeout` 15 s, `lock_timeout` 5 s and
+`idle_in_transaction_session_timeout` 30 s per session, and `anystore_rpc` sets
+`lock_timeout` 5 s. A lock timeout, deadlock or serialization failure is
+returned as a retryable `429 rate_limited`. PostgreSQL ignores a function-level
+`statement_timeout` for the statement already running, so on CloudBase set it
+on the database role the gateway uses, below
+`ANYSTORE_CLOUDBASE_PG_TIMEOUT_SECONDS`.
 
 The gateway offers no migration channel, so `ANYSTORE_MIGRATE_ON_START` is
 ignored for this backend and the RPC migration must be applied before the
@@ -300,7 +344,8 @@ the surface is missing, which turns a forgotten migration into a failed deploy
 rather than a stream of 500s.
 
 Every function is `CREATE OR REPLACE`, so re-applying the migration is safe.
-They run as `SECURITY INVOKER`. The lock-down migration revokes table, sequence
+Replacing a function keeps its owner and grants, so later RPC versions do not
+need the lock-down migration re-run. They run as `SECURITY INVOKER`. The lock-down migration revokes table, sequence
 and RPC access from `PUBLIC`, `anon` and `authenticated`, enables RLS on all
 internal tables, and grants only `service_role` the access required by the
 server-side API key.

@@ -7,6 +7,7 @@ use anystore_blobstore::{
     AbortBlobUpload, BlobRef, CompleteBlobUpload, CompletedPart, PrepareUpload, PreparedUpload,
     SignParts,
 };
+use anystore_domain::content_type::validate_content_type;
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::upload::{UploadMode, UploadState, validate_sha256};
 use anystore_domain::{ObjectId, UploadId};
@@ -97,6 +98,9 @@ impl UploadService {
                 }
                 if let Some(sha256) = &req.sha256 {
                     validate_sha256(sha256)?;
+                }
+                if let Some(content_type) = &req.content_type {
+                    validate_content_type(content_type)?;
                 }
 
                 let content_type = req
