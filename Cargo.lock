@@ -33,12 +33,14 @@ dependencies = [
  "anystore-blobstore",
  "anystore-domain",
  "anystore-metastore",
+ "anystore-testkit",
  "async-trait",
  "chrono",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
  "tracing",
  "ulid",
 ]
@@ -107,8 +109,10 @@ name = "anystore-http"
 version = "1.0.0"
 dependencies = [
  "anystore-application",
+ "anystore-blobstore",
  "anystore-domain",
  "anystore-metastore",
+ "anystore-testkit",
  "axum",
  "chrono",
  "http",

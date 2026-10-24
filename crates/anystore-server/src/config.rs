@@ -7,10 +7,15 @@ use anystore_domain::error::{DomainError, DomainResult};
 use anystore_metastore_postgrest::{
     ApiKey, DEFAULT_FUNCTION_NAME, DEFAULT_RPC_PATH, PostgrestConfig,
 };
-use chrono::Duration;
+use chrono::{Duration, FixedOffset, NaiveTime};
 use std::env;
 use std::fmt;
 use std::time::Duration as StdDuration;
+
+use crate::schedule::DailySchedule;
+
+/// Minimum length of the development blob backend's signing secret.
+pub const MIN_LOCAL_BLOB_SECRET_BYTES: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -19,7 +24,13 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
     pub public_base_url: String,
     pub blob_backend: BlobBackend,
-    pub maintenance_interval_seconds: u64,
+    /// In-process daily pass; `None` when disabled. A deployment that scales
+    /// to zero also needs an external trigger, see `POST /internal/maintenance`.
+    pub maintenance_schedule: Option<DailySchedule>,
+    /// Time budget of one pass.
+    pub maintenance_budget: StdDuration,
+    /// Settings that are still present in the environment but no longer read.
+    pub ignored_settings: Vec<&'static str>,
     pub app: AppConfig,
 }
 
@@ -121,21 +132,49 @@ fn parse<T: std::str::FromStr>(
     }
 }
 
+/// `ANYSTORE_MAINTENANCE_DAILY_AT` (`HH:MM`, or `off`) in
+/// `ANYSTORE_MAINTENANCE_UTC_OFFSET` (`±HH:MM`). Defaults to 03:00 at +08:00.
+fn maintenance_schedule(source: &dyn ConfigSource) -> DomainResult<Option<DailySchedule>> {
+    let raw = var(source, "ANYSTORE_MAINTENANCE_DAILY_AT").unwrap_or_else(|| "03:00".to_owned());
+    if raw.trim().eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    let at = NaiveTime::parse_from_str(raw.trim(), "%H:%M")
+        .map_err(|_| DomainError::internal("ANYSTORE_MAINTENANCE_DAILY_AT must be HH:MM or off"))?;
+    let offset = parse(
+        source,
+        "ANYSTORE_MAINTENANCE_UTC_OFFSET",
+        FixedOffset::east_opt(8 * 3600).expect("+08:00 is a valid offset"),
+    )?;
+    Ok(Some(DailySchedule { at, offset }))
+}
+
 impl ServerConfig {
     pub fn from_env() -> DomainResult<Self> {
         Self::from_source(&EnvSource)
     }
 
     pub fn from_source(source: &dyn ConfigSource) -> DomainResult<Self> {
-        let backend_name =
-            var(source, "ANYSTORE_BLOB_BACKEND").unwrap_or_else(|| "local_fs".to_owned());
+        // No default: a deployment that forgets this must not silently fall
+        // back to container-local storage.
+        let backend_name = required(source, "ANYSTORE_BLOB_BACKEND")?;
         let blob_backend = match backend_name.as_str() {
-            "local_fs" => BlobBackend::LocalFs {
-                root: var(source, "ANYSTORE_LOCAL_BLOB_ROOT")
-                    .unwrap_or_else(|| "./.anystore-blobs".to_owned()),
-                secret: var(source, "ANYSTORE_LOCAL_BLOB_SECRET")
-                    .unwrap_or_else(|| "anystore-development-secret".to_owned()),
-            },
+            "local_fs" => {
+                // Anyone holding the secret can sign uploads and downloads, so
+                // there is no built-in default to fall back to.
+                let secret = required(source, "ANYSTORE_LOCAL_BLOB_SECRET")?;
+                if secret.len() < MIN_LOCAL_BLOB_SECRET_BYTES {
+                    return Err(DomainError::internal(format!(
+                        "ANYSTORE_LOCAL_BLOB_SECRET must be at least \
+                         {MIN_LOCAL_BLOB_SECRET_BYTES} bytes"
+                    )));
+                }
+                BlobBackend::LocalFs {
+                    root: var(source, "ANYSTORE_LOCAL_BLOB_ROOT")
+                        .unwrap_or_else(|| "./.anystore-blobs".to_owned()),
+                    secret,
+                }
+            }
             "tencent_cos" => BlobBackend::TencentCos {
                 bucket: required(source, "ANYSTORE_COS_BUCKET")?,
                 endpoint: required(source, "ANYSTORE_COS_ENDPOINT")?,
@@ -221,18 +260,33 @@ impl ServerConfig {
             ..AppConfig::default()
         };
 
+        // Running without a token is an explicit development choice, never the
+        // result of a missing variable.
+        let auth_token = var(source, "ANYSTORE_AUTH_TOKEN");
+        if auth_token.is_none() && !parse(source, "ANYSTORE_ALLOW_ANONYMOUS", false)? {
+            return Err(DomainError::internal(
+                "ANYSTORE_AUTH_TOKEN must be set; set ANYSTORE_ALLOW_ANONYMOUS=true \
+                 to run without authentication",
+            ));
+        }
+
         Ok(Self {
             port,
             database,
-            auth_token: var(source, "ANYSTORE_AUTH_TOKEN"),
+            auth_token,
             public_base_url: var(source, "ANYSTORE_PUBLIC_BASE_URL")
                 .unwrap_or_else(|| format!("http://127.0.0.1:{port}")),
             blob_backend,
-            maintenance_interval_seconds: parse(
+            maintenance_schedule: maintenance_schedule(source)?,
+            maintenance_budget: StdDuration::from_secs(parse(
                 source,
-                "ANYSTORE_MAINTENANCE_INTERVAL_SECONDS",
-                300u64,
-            )?,
+                "ANYSTORE_MAINTENANCE_BUDGET_SECONDS",
+                20u64,
+            )?),
+            ignored_settings: ["ANYSTORE_MAINTENANCE_INTERVAL_SECONDS"]
+                .into_iter()
+                .filter(|key| var(source, key).is_some())
+                .collect(),
             app,
         })
     }
@@ -254,6 +308,17 @@ mod tests {
                     .collect(),
             )
         }
+
+        /// A valid local development baseline; `pairs` override it.
+        fn dev(pairs: &[(&str, &str)]) -> Self {
+            let mut source = Self::new(&[
+                ("ANYSTORE_BLOB_BACKEND", "local_fs"),
+                ("ANYSTORE_LOCAL_BLOB_SECRET", "0123456789abcdef"),
+                ("ANYSTORE_ALLOW_ANONYMOUS", "true"),
+            ]);
+            source.0.extend(Self::new(pairs).0);
+            source
+        }
     }
 
     impl ConfigSource for MapSource {
@@ -272,7 +337,7 @@ mod tests {
 
     #[test]
     fn postgres_stays_the_default_backend() {
-        let config = ServerConfig::from_source(&MapSource::new(&[(
+        let config = ServerConfig::from_source(&MapSource::dev(&[(
             "ANYSTORE_DATABASE_URL",
             "postgres://user:pw@localhost/anystore",
         )]))
@@ -292,13 +357,13 @@ mod tests {
 
     #[test]
     fn postgres_requires_a_database_url() {
-        let error = ServerConfig::from_source(&MapSource::new(&[])).unwrap_err();
+        let error = ServerConfig::from_source(&MapSource::dev(&[])).unwrap_err();
         assert!(detail(&error).contains("ANYSTORE_DATABASE_URL"));
     }
 
     #[test]
     fn cloudbase_postgrest_reads_its_own_settings() {
-        let config = ServerConfig::from_source(&MapSource::new(&[
+        let config = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_BACKEND", "cloudbase_postgrest"),
             (
                 "ANYSTORE_CLOUDBASE_PG_BASE_URL",
@@ -324,7 +389,7 @@ mod tests {
     #[test]
     fn cloudbase_postgrest_does_not_need_a_database_url() {
         assert!(
-            ServerConfig::from_source(&MapSource::new(&[
+            ServerConfig::from_source(&MapSource::dev(&[
                 ("ANYSTORE_DATABASE_BACKEND", "cloudbase_postgrest"),
                 ("ANYSTORE_CLOUDBASE_PG_BASE_URL", "https://env.example"),
                 ("ANYSTORE_CLOUDBASE_PG_API_KEY", "k"),
@@ -335,14 +400,14 @@ mod tests {
 
     #[test]
     fn cloudbase_postgrest_requires_its_credential_and_endpoint() {
-        let error = ServerConfig::from_source(&MapSource::new(&[
+        let error = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_BACKEND", "cloudbase_postgrest"),
             ("ANYSTORE_CLOUDBASE_PG_BASE_URL", "https://env.example"),
         ]))
         .unwrap_err();
         assert!(detail(&error).contains("ANYSTORE_CLOUDBASE_PG_API_KEY"));
 
-        let error = ServerConfig::from_source(&MapSource::new(&[
+        let error = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_BACKEND", "cloudbase_postgrest"),
             ("ANYSTORE_CLOUDBASE_PG_API_KEY", "k"),
         ]))
@@ -353,14 +418,14 @@ mod tests {
     #[test]
     fn an_unknown_database_backend_is_rejected() {
         let error =
-            ServerConfig::from_source(&MapSource::new(&[("ANYSTORE_DATABASE_BACKEND", "mysql")]))
+            ServerConfig::from_source(&MapSource::dev(&[("ANYSTORE_DATABASE_BACKEND", "mysql")]))
                 .unwrap_err();
         assert!(detail(&error).contains("ANYSTORE_DATABASE_BACKEND"));
     }
 
     #[test]
     fn configuration_debug_output_holds_no_secret() {
-        let config = ServerConfig::from_source(&MapSource::new(&[
+        let config = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_BACKEND", "cloudbase_postgrest"),
             ("ANYSTORE_CLOUDBASE_PG_BASE_URL", "https://env.example"),
             ("ANYSTORE_CLOUDBASE_PG_API_KEY", "top-secret"),
@@ -383,7 +448,7 @@ mod tests {
 
     #[test]
     fn the_postgres_url_is_redacted_in_debug_output() {
-        let config = ServerConfig::from_source(&MapSource::new(&[(
+        let config = ServerConfig::from_source(&MapSource::dev(&[(
             "ANYSTORE_DATABASE_URL",
             "postgres://user:hunter2@localhost/anystore",
         )]))
@@ -393,7 +458,7 @@ mod tests {
 
     #[test]
     fn the_platform_port_is_honoured_when_anystore_port_is_unset() {
-        let config = ServerConfig::from_source(&MapSource::new(&[
+        let config = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_URL", "postgres://localhost/anystore"),
             ("PORT", "9090"),
         ]))
@@ -404,11 +469,100 @@ mod tests {
 
     #[test]
     fn an_unparsable_number_is_rejected() {
-        let error = ServerConfig::from_source(&MapSource::new(&[
+        let error = ServerConfig::from_source(&MapSource::dev(&[
             ("ANYSTORE_DATABASE_URL", "postgres://localhost/anystore"),
             ("ANYSTORE_CHANGES_RETENTION_DAYS", "forever"),
         ]))
         .unwrap_err();
         assert!(detail(&error).contains("ANYSTORE_CHANGES_RETENTION_DAYS"));
+    }
+    #[test]
+    fn production_safety_settings_must_be_explicit() {
+        const DB: (&str, &str) = ("ANYSTORE_DATABASE_URL", "postgres://localhost/anystore");
+
+        let error =
+            ServerConfig::from_source(&MapSource::new(&[DB, ("ANYSTORE_AUTH_TOKEN", "token")]))
+                .unwrap_err();
+        assert!(detail(&error).contains("ANYSTORE_BLOB_BACKEND"));
+
+        let error = ServerConfig::from_source(&MapSource::new(&[
+            DB,
+            ("ANYSTORE_AUTH_TOKEN", "token"),
+            ("ANYSTORE_BLOB_BACKEND", "local_fs"),
+        ]))
+        .unwrap_err();
+        assert!(detail(&error).contains("ANYSTORE_LOCAL_BLOB_SECRET"));
+
+        let error = ServerConfig::from_source(&MapSource::dev(&[
+            DB,
+            ("ANYSTORE_LOCAL_BLOB_SECRET", "short"),
+        ]))
+        .unwrap_err();
+        assert!(detail(&error).contains("ANYSTORE_LOCAL_BLOB_SECRET"));
+
+        let error = ServerConfig::from_source(&MapSource::dev(&[
+            DB,
+            ("ANYSTORE_ALLOW_ANONYMOUS", "false"),
+        ]))
+        .unwrap_err();
+        assert!(detail(&error).contains("ANYSTORE_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn a_token_needs_no_anonymous_opt_in() {
+        let config = ServerConfig::from_source(&MapSource::dev(&[
+            ("ANYSTORE_DATABASE_URL", "postgres://localhost/anystore"),
+            ("ANYSTORE_ALLOW_ANONYMOUS", "false"),
+            ("ANYSTORE_AUTH_TOKEN", "token"),
+        ]))
+        .expect("config");
+        assert_eq!(config.auth_token.as_deref(), Some("token"));
+    }
+
+    #[test]
+    fn maintenance_runs_daily_at_three_shanghai_time_by_default() {
+        let config = ServerConfig::from_source(&MapSource::dev(&[(
+            "ANYSTORE_DATABASE_URL",
+            "postgres://localhost/anystore",
+        )]))
+        .expect("config");
+        let schedule = config.maintenance_schedule.expect("enabled by default");
+        assert_eq!(schedule.at, NaiveTime::from_hms_opt(3, 0, 0).unwrap());
+        assert_eq!(schedule.offset, FixedOffset::east_opt(8 * 3600).unwrap());
+        assert_eq!(config.maintenance_budget, StdDuration::from_secs(20));
+        assert!(config.ignored_settings.is_empty());
+    }
+
+    #[test]
+    fn maintenance_schedule_can_be_moved_or_disabled() {
+        const DB: (&str, &str) = ("ANYSTORE_DATABASE_URL", "postgres://localhost/anystore");
+        let config = ServerConfig::from_source(&MapSource::dev(&[
+            DB,
+            ("ANYSTORE_MAINTENANCE_DAILY_AT", "04:30"),
+            ("ANYSTORE_MAINTENANCE_UTC_OFFSET", "+00:00"),
+            ("ANYSTORE_MAINTENANCE_INTERVAL_SECONDS", "3600"),
+        ]))
+        .expect("config");
+        let schedule = config.maintenance_schedule.expect("enabled");
+        assert_eq!(schedule.at, NaiveTime::from_hms_opt(4, 30, 0).unwrap());
+        assert_eq!(schedule.offset, FixedOffset::east_opt(0).unwrap());
+        assert_eq!(
+            config.ignored_settings,
+            vec!["ANYSTORE_MAINTENANCE_INTERVAL_SECONDS"]
+        );
+
+        let config = ServerConfig::from_source(&MapSource::dev(&[
+            DB,
+            ("ANYSTORE_MAINTENANCE_DAILY_AT", "off"),
+        ]))
+        .expect("config");
+        assert!(config.maintenance_schedule.is_none());
+
+        let error = ServerConfig::from_source(&MapSource::dev(&[
+            DB,
+            ("ANYSTORE_MAINTENANCE_DAILY_AT", "3am"),
+        ]))
+        .unwrap_err();
+        assert!(detail(&error).contains("ANYSTORE_MAINTENANCE_DAILY_AT"));
     }
 }

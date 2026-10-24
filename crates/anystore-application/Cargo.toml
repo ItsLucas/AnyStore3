@@ -17,3 +17,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+anystore-testkit.workspace = true
+tokio.workspace = true

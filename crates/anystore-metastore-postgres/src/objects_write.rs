@@ -57,6 +57,12 @@ async fn lock_object(conn: &mut PgConnection, id: &ObjectId) -> DomainResult<Opt
     }))
 }
 
+fn invalid_folder_move() -> DomainError {
+    DomainError::InvalidMove(
+        "A folder cannot be moved into itself or one of its descendants.".into(),
+    )
+}
+
 /// Enforces `If-Match`, reporting the current revision on mismatch.
 fn check_if_match(current: Revision, if_match: Option<Revision>) -> DomainResult<()> {
     match if_match {
@@ -76,6 +82,18 @@ SELECT * FROM UNNEST(
     $6::timestamptz[], $7::text[], $8::text[], $9::boolean[])
 ";
 
+/// Takes the transaction-scoped lock that orders Change appends.
+///
+/// Re-entrant within a transaction. Every mutation takes it only after its row
+/// locks and writes, so waiting for it never blocks a holder of the lock.
+async fn lock_change_order(conn: &mut PgConnection) -> DomainResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('anystore:changes:append')::bigint)")
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx)?;
+    Ok(())
+}
+
 /// Appends Change records while holding a transaction-scoped ordering lock.
 ///
 /// PostgreSQL sequences are allocated before commit. Without the lock, a later
@@ -92,10 +110,7 @@ async fn append_changes(
         return Ok(Vec::new());
     }
 
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('anystore:changes:append')::bigint)")
-        .execute(&mut *conn)
-        .await
-        .map_err(map_sqlx)?;
+    lock_change_order(conn).await?;
 
     let seqs: Vec<i64> =
         sqlx::query_scalar("SELECT nextval('changes_seq') FROM generate_series(1, $1)")
@@ -337,9 +352,7 @@ impl ObjectMutationStore for PostgresMetaStore {
             if current.is_folder()
                 && is_self_or_descendant(&mut tx, &destination, &current.id).await?
             {
-                return Err(DomainError::InvalidMove(
-                    "A folder cannot be moved into itself or one of its descendants.".into(),
-                ));
+                return Err(invalid_folder_move());
             }
         }
 
@@ -368,6 +381,22 @@ impl ObjectMutationStore for PostgresMetaStore {
             Err(e) => return Err(map_sqlx(e)),
         };
         let new_revision = Revision(row.try_get::<i64, _>("revision").map_err(map_sqlx)? as u64);
+
+        // The ancestor walk above takes no row locks, so two concurrent moves
+        // (A into B's subtree, B into A's) can both pass it against the other's
+        // pre-move state and together commit a cycle. Re-check under the
+        // Change-order lock, which every move takes anyway: under READ COMMITTED
+        // the walk then sees every earlier move plus this one. Taking the lock
+        // only after the UPDATE keeps the usual "row locks, then Change lock"
+        // order, so this cannot deadlock against a concurrent writer.
+        if parent_changed && current.is_folder() {
+            lock_change_order(&mut tx).await?;
+            if let Some(destination) = &target_parent
+                && is_self_or_descendant(&mut tx, destination, &current.id).await?
+            {
+                return Err(invalid_folder_move());
+            }
+        }
 
         // One PATCH increments the revision once but may emit several Changes,
         // in a deterministic order.
@@ -683,13 +712,17 @@ impl ObjectMutationStore for PostgresMetaStore {
 // ---------------------------------------------------------------------------
 
 /// True when `candidate` is `subject` itself or lies beneath it.
+///
+/// Every recursive walk carries the ids it has visited and stops on a repeat,
+/// so a parent cycle can never turn a query into unbounded recursion.
 const ANCESTOR_QUERY: &str = "
-WITH RECURSIVE up(id, parent_id) AS (
-        SELECT id, parent_id FROM objects WHERE id = $1
+WITH RECURSIVE up(id, parent_id, visited) AS (
+        SELECT id, parent_id, ARRAY[id] FROM objects WHERE id = $1
     UNION ALL
-        SELECT o.id, o.parent_id
+        SELECT o.id, o.parent_id, up.visited || o.id
         FROM objects o
         JOIN up ON o.id = up.parent_id
+        WHERE o.id <> ALL(up.visited)
 )
 SELECT EXISTS(SELECT 1 FROM up WHERE id = $2)
 ";
@@ -708,13 +741,13 @@ async fn is_self_or_descendant(
 }
 
 const DESCENDANTS_QUERY: &str = "
-WITH RECURSIVE down(id, depth) AS (
-        SELECT id, 0 FROM objects WHERE id = $1 AND deleted_at IS NULL
+WITH RECURSIVE down(id, depth, visited) AS (
+        SELECT id, 0, ARRAY[id] FROM objects WHERE id = $1 AND deleted_at IS NULL
     UNION ALL
-        SELECT o.id, d.depth + 1
+        SELECT o.id, d.depth + 1, d.visited || o.id
         FROM objects o
         JOIN down d ON o.parent_id = d.id
-        WHERE o.deleted_at IS NULL
+        WHERE o.deleted_at IS NULL AND o.id <> ALL(d.visited)
 )
 SELECT id FROM down ORDER BY depth DESC, id ASC
 ";

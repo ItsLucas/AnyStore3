@@ -1,6 +1,7 @@
 //! AnyStore server entry point.
 
 mod config;
+mod schedule;
 
 use anystore_application::{AppState, MaintenanceService, Metrics};
 use anystore_blobstore::{BlobRegistry, BlobStore};
@@ -14,15 +15,20 @@ use anystore_metastore_postgrest::PostgrestMetaStore;
 use axum::Router;
 use chrono::Utc;
 use config::{BlobBackend, DatabaseBackend, ServerConfig};
+use schedule::DailySchedule;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        // The message is deliberately free of credentials.
-        eprintln!("anystore-server failed to start: {error}");
+        // `Internal` displays an opaque public message; the operator needs the
+        // underlying cause, which is deliberately free of credentials.
+        match std::error::Error::source(&error) {
+            Some(cause) => eprintln!("anystore-server failed to start: {cause}"),
+            None => eprintln!("anystore-server failed to start: {error}"),
+        }
         std::process::exit(1);
     }
 }
@@ -35,6 +41,9 @@ async fn run() -> DomainResult<()> {
         .init();
 
     let config = ServerConfig::from_env()?;
+    for key in &config.ignored_settings {
+        tracing::warn!("{key} is no longer read and can be removed");
+    }
 
     let meta = connect_meta_store(&config.database).await?;
 
@@ -79,11 +88,18 @@ async fn run() -> DomainResult<()> {
         Arc::clone(&metrics),
     ));
 
+    let maintenance = MaintenanceService::new(Arc::clone(&app));
+
     let http_state = HttpState {
         app: Arc::clone(&app),
+        maintenance: maintenance.clone(),
+        maintenance_budget: config.maintenance_budget,
         auth: Arc::new(match &config.auth_token {
             Some(token) => AuthConfig::bearer(token.clone()),
-            None => AuthConfig::disabled(),
+            None => {
+                tracing::warn!("authentication is disabled (ANYSTORE_ALLOW_ANONYMOUS=true)");
+                AuthConfig::disabled()
+            }
         }),
         metrics: Arc::clone(&metrics),
     };
@@ -93,7 +109,9 @@ async fn run() -> DomainResult<()> {
         router = router.merge(dev);
     }
 
-    spawn_maintenance(Arc::clone(&app), config.maintenance_interval_seconds);
+    if let Some(schedule) = config.maintenance_schedule {
+        spawn_maintenance(maintenance, schedule, config.maintenance_budget);
+    }
 
     let address = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&address)
@@ -141,32 +159,53 @@ async fn connect_meta_store(backend: &DatabaseBackend) -> DomainResult<Arc<dyn M
     }
 }
 
-/// Runs maintenance on a schedule. Failures are logged and never surfaced to
-/// the API.
-fn spawn_maintenance(app: Arc<AppState>, interval_seconds: u64) {
-    if interval_seconds == 0 {
-        return;
-    }
+/// Runs one maintenance pass a day at the scheduled wall-clock time.
+///
+/// Only fires while this process is alive at that time; a deployment that
+/// scales to zero must also call `POST /internal/maintenance` from an external
+/// scheduler. Failures are logged and never surfaced to the API.
+fn spawn_maintenance(service: MaintenanceService, schedule: DailySchedule, budget: Duration) {
     tokio::spawn(async move {
-        let service = MaintenanceService::new(Arc::clone(&app));
-        let mut ticker = tokio::time::interval(Duration::from_secs(interval_seconds));
-        ticker.tick().await;
         loop {
-            ticker.tick().await;
-            match service.run_once(Utc::now()).await {
-                Ok(report) => {
-                    if let Ok(pending) = app.meta.count_pending_gc().await {
-                        Metrics::set(&app.metrics.blob_gc_pending, pending);
-                    }
-                    tracing::debug!(?report, "maintenance pass complete");
-                }
+            let next = schedule.next_after(Utc::now());
+            tracing::info!(next_run = %next, "maintenance scheduled");
+            let wait = (next - Utc::now()).to_std().unwrap_or_default();
+            tokio::time::sleep(wait).await;
+
+            match service.run(Utc::now(), Instant::now() + budget).await {
+                Ok(Some(report)) => tracing::info!(?report, "scheduled maintenance pass complete"),
+                Ok(None) => tracing::info!("maintenance already running; skipping scheduled pass"),
                 Err(error) => tracing::warn!("maintenance pass failed: {error}"),
             }
         }
     });
 }
 
+/// Resolves on SIGINT or SIGTERM. The binary runs as PID 1 in its container,
+/// where the kernel ignores SIGTERM unless a handler is installed, so without
+/// this every scale-in would wait out the grace period and end in SIGKILL.
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutting down");
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!("cannot listen for SIGTERM: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => tracing::info!("SIGINT received; draining in-flight requests"),
+        () = terminate => tracing::info!("SIGTERM received; draining in-flight requests"),
+    }
 }

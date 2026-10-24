@@ -87,16 +87,18 @@ pub fn decode_upload(row: &PgRow) -> DomainResult<UploadRecord> {
 /// Renders `path` for each id by walking parents to the root.
 ///
 /// `path` is derived state: it is never stored on descendants, so renaming or
-/// moving a folder requires no descendant rewrite.
+/// moving a folder requires no descendant rewrite. The walk stops on a repeated
+/// id, so a parent cycle cannot recurse without bound.
 const PATH_QUERY: &str = "
-WITH RECURSIVE chain(root_id, cur_id, parent_id, name, depth) AS (
-        SELECT o.id, o.id, o.parent_id, o.name, 0
+WITH RECURSIVE chain(root_id, cur_id, parent_id, name, depth, visited) AS (
+        SELECT o.id, o.id, o.parent_id, o.name, 0, ARRAY[o.id]
         FROM objects o
         WHERE o.id = ANY($1)
     UNION ALL
-        SELECT c.root_id, p.id, p.parent_id, p.name, c.depth + 1
+        SELECT c.root_id, p.id, p.parent_id, p.name, c.depth + 1, c.visited || p.id
         FROM chain c
         JOIN objects p ON p.id = c.parent_id
+        WHERE p.id <> ALL(c.visited)
 )
 SELECT root_id,
        '/' || COALESCE(

@@ -1,6 +1,7 @@
 //! Object lifecycle: create, read, list, resolve, patch and delete.
 
 use anystore_domain::ObjectId;
+use anystore_domain::content_type::validate_content_type;
 use anystore_domain::error::{DomainError, DomainResult};
 use anystore_domain::metadata::{
     MetadataPatch, validate_metadata_document, validate_metadata_patch,
@@ -113,6 +114,9 @@ impl ObjectService {
             return Err(DomainError::InvalidRequest(
                 "content_type is only valid for files.".into(),
             ));
+        }
+        if let Some(content_type) = &req.content_type {
+            validate_content_type(content_type)?;
         }
 
         let parent_id = req.parent_id.unwrap_or_else(ObjectId::root);

@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any
@@ -69,6 +70,25 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def read_changes_to_end(cursor: str | None) -> tuple[list[dict[str, Any]], str]:
+    """Pages through the Changes feed until it is caught up.
+
+    A read without a cursor starts from the oldest retained Change, so on a
+    deployment with history the smoke test's own Changes are never on the
+    first page. Returns every item read and the cursor at the tail.
+    """
+    items: list[dict[str, Any]] = []
+    while True:
+        query = "limit=1000" + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
+        page = api("GET", f"/changes?{query}")
+        require(page.status == 200, f"Changes read failed: {page.status}")
+        data = page.json()
+        items.extend(data["items"])
+        cursor = data["next_cursor"]
+        if not data["has_more"]:
+            return items, cursor
+
+
 def main() -> int:
     if not BASE:
         print("ANYSTORE_TEST_BASE_URL is required", file=sys.stderr)
@@ -94,6 +114,7 @@ def main() -> int:
         )
         root = api("GET", "/objects/root")
         require(root.status == 200 and root.json()["id"] == "root", "root read failed")
+        _, changes_tail = read_changes_to_end(None)
 
         folder_key = f"smoke-folder-{RUN}"
         folder_body = {
@@ -176,12 +197,9 @@ def main() -> int:
         download = request("GET", location or "", authenticated=False, follow=True)
         require(download.status == 200 and download.body == payload, "download mismatch")
 
-        changes = api("GET", "/changes?limit=1000")
-        require(changes.status == 200, "Changes read failed")
+        new_changes, _ = read_changes_to_end(changes_tail)
         actions = [
-            change["action"]
-            for change in changes.json()["items"]
-            if change["object_id"] == file_id
+            change["action"] for change in new_changes if change["object_id"] == file_id
         ]
         require(actions == ["created", "content_ready"], f"unexpected Changes: {actions}")
 

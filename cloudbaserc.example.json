@@ -1,3 +1,24 @@
 {
-  "envId": "YOUR_CLOUDBASE_ENV_ID"
+  "envId": "YOUR_CLOUDBASE_ENV_ID",
+  "functionRoot": "cloudbase/functions",
+  "functions": [
+    {
+      "name": "anystore-maintenance",
+      "runtime": "Nodejs20.19",
+      "handler": "index.main",
+      "timeout": 900,
+      "memorySize": 128,
+      "envVariables": {
+        "ANYSTORE_MAINTENANCE_URL": "https://YOUR_SERVICE_DOMAIN/internal/maintenance",
+        "ANYSTORE_AUTH_TOKEN": "YOUR_ANYSTORE_AUTH_TOKEN"
+      },
+      "triggers": [
+        {
+          "name": "daily-0300",
+          "type": "timer",
+          "config": "0 0 3 * * * *"
+        }
+      ]
+    }
+  ]
 }

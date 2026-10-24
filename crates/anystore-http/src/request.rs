@@ -21,13 +21,24 @@ pub struct RequestMeta {
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub const IF_MATCH_HEADER: &str = "if-match";
 
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
+/// Upper bound on `Idempotency-Key`; the key is persisted and echoed in every
+/// Change record the request emits.
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
+
+/// Reads a header that controls write semantics.
+///
+/// A header that is present but not visible ASCII is rejected rather than
+/// treated as absent: silently dropping `If-Match` or `Idempotency-Key` would
+/// turn a conditional or idempotent write into an unconditional one.
+fn header_value(headers: &HeaderMap, name: &str) -> DomainResult<Option<String>> {
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let text = value
+        .to_str()
+        .map_err(|_| DomainError::InvalidRequest(format!("{name} must be ASCII.")))?
+        .trim();
+    Ok((!text.is_empty()).then(|| text.to_owned()))
 }
 
 /// Parses `If-Match`.
@@ -35,7 +46,7 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// AnyStore revisions are plain integers; a quoted ETag form is tolerated so
 /// generic HTTP clients interoperate.
 pub fn parse_if_match(headers: &HeaderMap) -> DomainResult<Option<Revision>> {
-    let Some(raw) = header_value(headers, IF_MATCH_HEADER) else {
+    let Some(raw) = header_value(headers, IF_MATCH_HEADER)? else {
         return Ok(None);
     };
     let cleaned = raw.trim_matches('"');
@@ -47,8 +58,16 @@ pub fn parse_if_match(headers: &HeaderMap) -> DomainResult<Option<Revision>> {
         })
 }
 
-pub fn idempotency_key(headers: &HeaderMap) -> Option<IdempotencyKey> {
-    header_value(headers, IDEMPOTENCY_HEADER).map(IdempotencyKey::new)
+pub fn idempotency_key(headers: &HeaderMap) -> DomainResult<Option<IdempotencyKey>> {
+    let Some(raw) = header_value(headers, IDEMPOTENCY_HEADER)? else {
+        return Ok(None);
+    };
+    if raw.len() > MAX_IDEMPOTENCY_KEY_LEN || !raw.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(DomainError::InvalidRequest(format!(
+            "Idempotency-Key must be 1-{MAX_IDEMPOTENCY_KEY_LEN} visible ASCII characters."
+        )));
+    }
+    Ok(Some(IdempotencyKey::new(raw)))
 }
 
 /// Assembles the application request context, including the canonical hash used
@@ -79,7 +98,7 @@ pub fn context(
         request_id: meta.request_id.clone(),
         principal_id: meta.principal_id.clone(),
         operation: format!("{method} {route}"),
-        idempotency_key: idempotency_key(headers),
+        idempotency_key: idempotency_key(headers)?,
         request_hash,
         if_match,
         now: Utc::now(),
@@ -214,6 +233,7 @@ pub fn parse_bool(pairs: &[(String, String)], key: &str) -> DomainResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     #[test]
     fn if_match_accepts_bare_and_quoted_revisions() {
@@ -233,6 +253,39 @@ mod tests {
             parse_if_match(&headers).unwrap_err().code(),
             "invalid_request"
         );
+    }
+
+    #[test]
+    fn unreadable_write_headers_are_rejected_not_ignored() {
+        for name in [IF_MATCH_HEADER, IDEMPOTENCY_HEADER] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_bytes(b"1\xe2").unwrap());
+            let error = match name {
+                IF_MATCH_HEADER => parse_if_match(&headers).unwrap_err(),
+                _ => idempotency_key(&headers).unwrap_err(),
+            };
+            assert_eq!(error.code(), "invalid_request", "{name}");
+        }
+    }
+
+    #[test]
+    fn idempotency_key_is_bounded_visible_ascii() {
+        let mut headers = HeaderMap::new();
+        headers.insert(IDEMPOTENCY_HEADER, "run_01-stage_03".parse().unwrap());
+        assert_eq!(
+            idempotency_key(&headers).unwrap().unwrap().as_str(),
+            "run_01-stage_03"
+        );
+
+        headers.insert(IDEMPOTENCY_HEADER, "has space".parse().unwrap());
+        assert!(idempotency_key(&headers).is_err());
+
+        let long = "k".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
+        headers.insert(IDEMPOTENCY_HEADER, long.parse().unwrap());
+        assert!(idempotency_key(&headers).is_err());
+
+        headers.insert(IDEMPOTENCY_HEADER, "  ".parse().unwrap());
+        assert_eq!(idempotency_key(&headers).unwrap(), None);
     }
 
     #[test]

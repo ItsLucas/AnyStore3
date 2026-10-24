@@ -4,6 +4,7 @@
 //! not depend on Axum, SQLx, HTTP, PostgreSQL, or any cloud provider SDK.
 
 pub mod change;
+pub mod content_type;
 pub mod error;
 pub mod ids;
 pub mod metadata;
@@ -14,6 +15,7 @@ pub mod path;
 pub mod upload;
 
 pub use change::{ChangeAction, ChangeRecord};
+pub use content_type::validate_content_type;
 pub use error::{DomainError, DomainResult};
 pub use ids::{ChangeId, CursorId, IdempotencyKey, ObjectId, PrincipalId, RequestId, UploadId};
 pub use metadata::{MetadataPatch, apply_metadata_patch};

@@ -6,6 +6,7 @@
 mod changes;
 mod content;
 mod error;
+mod maintenance;
 mod metrics;
 mod middleware;
 mod objects;
@@ -19,7 +20,7 @@ pub use middleware::AuthConfig;
 
 use crate::error::status_error_response;
 use crate::request::RequestMeta;
-use anystore_application::{AppState, Metrics as AppMetrics};
+use anystore_application::{AppState, MaintenanceService, Metrics as AppMetrics};
 use anystore_domain::RequestId;
 use anystore_domain::error::{DomainError, DomainResult};
 use axum::Extension;
@@ -37,6 +38,11 @@ pub struct HttpState {
     pub app: Arc<AppState>,
     pub auth: Arc<AuthConfig>,
     pub metrics: Arc<Metrics>,
+    /// Shared with the in-process scheduler so passes never overlap.
+    pub maintenance: MaintenanceService,
+    /// Time budget of a triggered pass; keep it below the platform's request
+    /// timeout.
+    pub maintenance_budget: std::time::Duration,
 }
 
 /// Maximum JSON request body. Metadata is untrusted input, so it is bounded.
@@ -84,6 +90,24 @@ fn record_error(metrics: &AppMetrics, error: &DomainError) {
     }
 }
 
+/// Keeps the contract's error envelope even when a handler panics. The request
+/// id is not reachable here; the pipeline still sets `x-request-id`.
+fn panic_response(_panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    tracing::error!("handler panicked");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "internal_error",
+        "message": "Internal error.",
+    }))
+    .unwrap_or_default();
+    let mut response = Response::new(axum::body::Body::from(body));
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 pub fn router(state: HttpState) -> Router {
     let api = Router::new()
         .route("/objects", post(objects::create))
@@ -108,11 +132,12 @@ pub fn router(state: HttpState) -> Router {
 
     Router::new()
         .nest("/api/v1", api)
+        .route("/internal/maintenance", post(maintenance::run))
         .route("/healthz", get(middleware::healthz))
         .route("/metrics", get(metrics::render))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(CatchPanicLayer::new())
+        .layer(CatchPanicLayer::custom(panic_response))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::pipeline,
